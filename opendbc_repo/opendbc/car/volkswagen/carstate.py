@@ -3,7 +3,7 @@ from opendbc.can import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.volkswagen.values import DBC, CanBus, NetworkLocation, TransmissionType, GearShifter, \
+from opendbc.car.volkswagen.values import DBC, CAR, CanBus, NetworkLocation, TransmissionType, GearShifter, \
                                                       CarControllerParams, VolkswagenFlags
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -105,7 +105,10 @@ class CarState(CarStateBase):
       acc_limiter_mode = ext_cp.vl["ACC_02"]["ACC_Gesetzte_Zeitluecke"] == 0
       speed_limiter_mode = bool(pt_cp.vl["TSK_06"]["TSK_Limiter_ausgewaehlt"])
 
-      ret.cruiseState.available = pt_cp.vl["TSK_06"]["TSK_Status"] in (2, 3, 4, 5)
+      if self.CP.carFingerprint == CAR.VOLKSWAGEN_CRAFTER_MK2:
+        ret.cruiseState.available = True  # VW: force ACC always-available on the Crafter (overrides TSK_Status gating)
+      else:
+        ret.cruiseState.available = pt_cp.vl["TSK_06"]["TSK_Status"] in (2, 3, 4, 5)
       ret.cruiseState.enabled = pt_cp.vl["TSK_06"]["TSK_Status"] in (3, 4, 5)
       ret.cruiseState.speed = ext_cp.vl["ACC_02"]["ACC_Wunschgeschw_02"] * CV.KPH_TO_MS if self.CP.pcmCruise else 0
       ret.accFaulted = pt_cp.vl["TSK_06"]["TSK_Status"] in (6, 7)

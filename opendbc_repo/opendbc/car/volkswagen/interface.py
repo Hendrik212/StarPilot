@@ -97,6 +97,11 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.VOLKSWAGEN_TAOS_MK1:
       # Logged Taos braking response aligns about 0.1 s later than the MQB default.
       ret.longitudinalActuatorDelay = 0.25
+    elif candidate == CAR.VOLKSWAGEN_CRAFTER_MK2:
+      # VW: torque tuning instead of PID default, validated on-road for the heavy van
+      ret.steerLimitTimer = 1.3
+      ret.steerActuatorDelay = 0.2
+      CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     ret.pcmCruise = not ret.openpilotLongitudinalControl
     ret.stopAccel = -0.55

@@ -142,6 +142,18 @@ class HudRenderer(Widget):
     if self.draw_exp_button:
       self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
 
+    # Dimensions overlay disabled - was only needed for UK narrow-lane driving
+    # self._draw_gc_dimensions(rect)
+
+  def _draw_gc_dimensions(self, rect: rl.Rectangle) -> None:
+    """Grand California 600 dimensions - static reminder, bottom-right corner."""
+    gc_dims = ("L 5.99m / 19'8\"", "W 2.43m / 8'0\"", "H 3.00m / 9'10\"")
+    gc_right = rect.x + rect.width - 30
+    gc_ys = (rect.y + rect.height - 230, rect.y + rect.height - 150, rect.y + rect.height - 70)
+    for text, y in zip(gc_dims, gc_ys, strict=True):
+      text_width = measure_text_cached(self._font_semi_bold, text, 60).x
+      rl.draw_text_ex(self._font_semi_bold, text, rl.Vector2(gc_right - text_width, y), 60, 0, COLORS.WHITE)
+
   def user_interacting(self) -> bool:
     return self._exp_button.is_pressed or self._navigation_card.is_pressed
 

@@ -31,6 +31,8 @@ class CarController(CarControllerBase):
     self.eps_timer_soft_disable_alert = False
     self.hca_frame_timer_running = 0
     self.hca_frame_same_torque = 0
+    self.frames_at_standstill = 0
+    self.standstill_timer_is_resettable = False
 
   def update(self, CC, CS, now_nanos, starpilot_toggles):
     actuators = CC.actuators
@@ -89,6 +91,23 @@ class CarController(CarControllerBase):
         accel = float(np.clip(actuators.accel, self.CCP.ACCEL_MIN, self.CCP.ACCEL_MAX) if CC.longActive else 0)
         stopping = actuators.longControlState == LongCtrlState.stopping
         starting = actuators.longControlState == LongCtrlState.pid and (CS.esp_hold_confirmation or CS.out.vEgo < starpilot_toggles.vEgoStopping)
+
+        # VW MQB ACC standstill improvements (PR #2764): force ACC restart if stuck at standstill
+        if CC.longActive and CS.out.vEgo < 0.1:
+          self.frames_at_standstill += 1
+        else:
+          self.frames_at_standstill = 0
+          self.standstill_timer_is_resettable = False
+
+        if self.frames_at_standstill > 50:  # ~1s at 50Hz
+          if not self.standstill_timer_is_resettable:
+            acc_control = 0  # briefly drop ACC to reset standstill timer
+            self.standstill_timer_is_resettable = True
+          elif self.frames_at_standstill > 100:  # ~2s total
+            starting = True  # toggle ACC to force restart
+            self.frames_at_standstill = 0
+            self.standstill_timer_is_resettable = False
+
         can_sends.extend(self.CCS.create_acc_accel_control(self.packer_pt, self.CAN.pt, CS.acc_type, CC.longActive, accel,
                                                            acc_control, stopping, starting, CS.esp_hold_confirmation))
 
