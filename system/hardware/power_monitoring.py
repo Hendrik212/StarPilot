@@ -107,24 +107,30 @@ class PowerMonitoring:
     return int(self.car_battery_capacity_uWh)
 
   # See if we need to shutdown
-  def should_shutdown(self, ignition: bool, in_car: bool, offroad_timestamp: float | None, started_seen: bool, starpilot_toggles: SimpleNamespace):
+  def shutdown_reason(self, ignition: bool, in_car: bool, offroad_timestamp: float | None,
+                      started_seen: bool, starpilot_toggles: SimpleNamespace) -> str | None:
     if offroad_timestamp is None:
-      return False
+      return None
 
     now = time.monotonic()
-    should_shutdown = False
     offroad_time = (now - offroad_timestamp)
-    # VW camper: keep device alive while parked; shut down only to protect the starter battery
-    #low_voltage_shutdown = (self.car_voltage_mV < (starpilot_toggles.low_voltage_shutdown * 1e3) and
-    #                        offroad_time > VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S)
-    #should_shutdown |= offroad_time > starpilot_toggles.device_shutdown_time
-    #should_shutdown |= low_voltage_shutdown
-    #should_shutdown |= (self.car_battery_capacity_uWh <= 0)
-    should_shutdown |= (self.car_voltage_mV / 1e3 <= 11.6)
+    # VW camper: keep device alive while parked; shut down only to protect the starter battery.
+    # Bypasses StarPilot's low_voltage_shutdown/device_shutdown_time toggles and battery-capacity
+    # trigger on purpose - reuses their "low_voltage" reason string for consistent logging.
+    reason = "low_voltage" if self.car_voltage_mV / 1e3 <= 11.6 else None
+    should_shutdown = reason is not None
     should_shutdown &= not ignition
     should_shutdown &= (not self.params.get_bool("DisablePowerDown"))
     should_shutdown &= in_car
     should_shutdown &= offroad_time > DELAY_SHUTDOWN_TIME_S
-    should_shutdown |= self.params.get_bool("ForcePowerDown")
+
+    forced = self.params.get_bool("ForcePowerDown")
+    should_shutdown |= forced
     should_shutdown &= started_seen or (now > MIN_ON_TIME_S)
-    return should_shutdown
+    if not should_shutdown:
+      return None
+    return "forced_power_down" if forced else reason
+
+  def should_shutdown(self, ignition: bool, in_car: bool, offroad_timestamp: float | None,
+                      started_seen: bool, starpilot_toggles: SimpleNamespace):
+    return self.shutdown_reason(ignition, in_car, offroad_timestamp, started_seen, starpilot_toggles) is not None

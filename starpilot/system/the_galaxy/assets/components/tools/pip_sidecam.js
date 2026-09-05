@@ -5,6 +5,18 @@ const CANVAS_H = 480;
 const ZOOM_MIN = 60;
 const ZOOM_MAX = 640;
 const ZOOM_STEP = 5;
+const VEHICLE_SIDE_LABELS = {
+  left: {
+    canvas: "LEFT SIDE OF VEHICLE - LEFT HERE",
+    button: "Set Left Side of Vehicle - Left Here",
+    moveButton: "Move Left Side of Vehicle - Left Here",
+  },
+  right: {
+    canvas: "RIGHT SIDE OF VEHICLE - RIGHT HERE",
+    button: "Set Right Side of Vehicle - Right Here",
+    moveButton: "Move Right Side of Vehicle - Right Here",
+  },
+};
 let initialLoadTriggered = false;
 
 const state = reactive({
@@ -23,6 +35,97 @@ const state = reactive({
 let _loadedImage = null;
 let _lastCanvas = null;
 let loadedConfig = null;
+let deviceType = null;
+
+const C4_ROAD_ASPECT = 476 / 240;
+
+function isC4() {
+  return (deviceType || "").toLowerCase() === "mici";
+}
+
+function drawCurvedRect(ctx, x, y, w, h) {
+  const r = Math.min(w, h) * 0.22;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function cropSource(ctx, img, center, zoom) {
+  const cw = ctx.canvas.width;
+  const ch = ctx.canvas.height;
+  const nativeW = img.naturalWidth;
+  const nativeH = img.naturalHeight;
+  const [cx, cy] = center;
+  const nativeCx = (cw - cx) * nativeW / cw;
+  const nativeCy = cy * nativeH / ch;
+  const nativeZoom = zoom * nativeW / cw;
+  return { cw, ch, cx, cy, nativeCx, nativeCy, nativeZoom };
+}
+
+function drawC4Preview(ctx, img, center, zoom, color) {
+  const { cw, ch, cx, cy, nativeCx, nativeCy, nativeZoom } = cropSource(ctx, img, center, zoom);
+
+  let w = Math.min(zoom * 1.1, cw * 0.55);
+  w = Math.max(60, w);
+  let h = w / C4_ROAD_ASPECT;
+  if (h > ch * 0.5) {
+    h = ch * 0.5;
+    w = h * C4_ROAD_ASPECT;
+  }
+  const x = cx - w / 2;
+  const y = cy - h / 2;
+  const aspect = w / h;
+  const sx = nativeCx - nativeZoom / 2;
+  const sh = nativeZoom / aspect;
+  const sy = nativeCy - sh / 2;
+
+  ctx.save();
+  drawCurvedRect(ctx, x, y, w, h);
+  ctx.fillStyle = "#000";
+  ctx.fill();
+  ctx.clip();
+  ctx.translate(x + w, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(img, sx, sy, nativeZoom, sh, 0, y, w, h);
+  ctx.restore();
+
+  ctx.save();
+  drawCurvedRect(ctx, x, y, w, h);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawC3Preview(ctx, img, center, zoom, color) {
+  const { cx, cy, nativeCx, nativeCy, nativeZoom } = cropSource(ctx, img, center, zoom);
+  const half = zoom / 2;
+  const sx = nativeCx - nativeZoom / 2;
+  const sy = nativeCy - nativeZoom / 2;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, half, 0, Math.PI * 2);
+  ctx.fillStyle = "#000";
+  ctx.fill();
+  ctx.clip();
+  ctx.translate(cx + half, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(img, sx, sy, nativeZoom, nativeZoom, 0, cy - half, zoom, zoom);
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, half, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
 
 function getCanvas() {
   return document.getElementById("pip-sidecam-canvas");
@@ -60,7 +163,20 @@ function redraw() {
   const img = _loadedImage;
   if (img) {
     canvas._img = img;
+    ctx.save();
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    ctx.font = "bold 14px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+    ctx.fillRect(0, 0, canvas.width / 2, 34);
+    ctx.fillRect(canvas.width / 2, 0, canvas.width / 2, 34);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(VEHICLE_SIDE_LABELS.left.canvas, canvas.width / 4, 22);
+    ctx.fillText(VEHICLE_SIDE_LABELS.right.canvas, canvas.width * 3 / 4, 22);
   } else {
     ctx.fillStyle = "#222";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -73,8 +189,8 @@ function redraw() {
 
   const half = state.zoom / 2;
   const sides = [
-    { key: "left", center: state.leftCenter, color: "#0d6efd", label: "LEFT WINDOW" },
-    { key: "right", center: state.rightCenter, color: "#fd7e14", label: "RIGHT WINDOW" },
+    { key: "left", center: state.leftCenter, color: "#0d6efd", label: VEHICLE_SIDE_LABELS.left.canvas },
+    { key: "right", center: state.rightCenter, color: "#fd7e14", label: VEHICLE_SIDE_LABELS.right.canvas },
   ];
 
   for (const side of sides) {
@@ -82,19 +198,11 @@ function redraw() {
 
     const [cx, cy] = side.center;
 
-    // Crop square (what gets sampled) + circular bubble overlay.
-    ctx.strokeStyle = side.color;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([]);
-    ctx.strokeRect(cx - half, cy - half, state.zoom, state.zoom);
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, half, 0, Math.PI * 2);
-    ctx.fillStyle = side.color + "40";
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = side.color;
-    ctx.stroke();
+    if (isC4()) {
+      drawC4Preview(ctx, img, side.center, state.zoom, side.color);
+    } else {
+      drawC3Preview(ctx, img, side.center, state.zoom, side.color);
+    }
 
     // Center dot
     ctx.beginPath();
@@ -117,7 +225,7 @@ function redraw() {
     ctx.font = "bold 15px monospace";
     ctx.textAlign = "center";
     ctx.fillText(
-      state.armSide === "left" ? "Click to set LEFT window center" : "Click to set RIGHT window center",
+      state.armSide === "left" ? "Click LEFT HERE for the LEFT SIDE OF VEHICLE" : "Click RIGHT HERE for the RIGHT SIDE OF VEHICLE",
       canvas.width / 2,
       canvas.height - 18,
     );
@@ -195,7 +303,17 @@ function canvasClick(e) {
   const rect = canvas.getBoundingClientRect();
   const x = Math.round((e.clientX - rect.left) * (canvas.width / rect.width));
   const y = Math.round((e.clientY - rect.top) * (canvas.height / rect.height));
-  if (x < 0 || y < 0) return;
+  if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return;
+
+  const leftHalf = x < canvas.width / 2;
+  if ((state.armSide === "left" && !leftHalf) || (state.armSide === "right" && leftHalf)) {
+    state.error = state.armSide === "left"
+      ? "LEFT SIDE OF VEHICLE is on the LEFT. Click the left half of the preview."
+      : "RIGHT SIDE OF VEHICLE is on the RIGHT. Click the right half of the preview.";
+    state.success = "";
+    requestAnimationFrame(redraw);
+    return;
+  }
 
   if (state.armSide === "left") {
     state.leftCenter = [x, y];
@@ -249,16 +367,17 @@ async function saveConfig() {
 
   const { cw, ch, nativeW, nativeH } = canvasScale();
 
+  // The preview is mirrored for vehicle-side clarity; the daemon still stores raw image coordinates.
   function toNative(center) {
     if (!center) return [];
-    return [Math.round(center[0] * nativeW / cw), Math.round(center[1] * nativeH / ch)];
+    return [Math.round((cw - center[0]) * nativeW / cw), Math.round(center[1] * nativeH / ch)];
   }
 
   const config = {
     width: nativeW,
     height: nativeH,
-    center_left: toNative(state.leftCenter),
-    center_right: toNative(state.rightCenter),
+    center_left: toNative(state.rightCenter),
+    center_right: toNative(state.leftCenter),
     crop_size: Math.round(state.zoom * nativeW / cw),
   };
 
@@ -287,8 +406,9 @@ async function loadExistingConfig() {
   try {
     const resp = await fetch("/api/pip_preview/config");
     if (!resp.ok) return;
-    const config = await resp.json();
-    loadedConfig = config;
+    const data = await resp.json();
+    deviceType = data.device_type || deviceType || null;
+    loadedConfig = data.mask || null;
     applyConfigToCanvas();
   } catch (e) {
     console.error("PiP Preview config load failed", e);
@@ -309,11 +429,11 @@ function applyConfigToCanvas() {
 
   function toCanvas(center) {
     if (!Array.isArray(center) || center.length < 2) return null;
-    return [Math.round(center[0] * cw / nativeW), Math.round(center[1] * ch / nativeH)];
+    return [Math.round(cw - center[0] * cw / nativeW), Math.round(center[1] * ch / nativeH)];
   }
 
-  state.leftCenter = toCanvas(config.center_left);
-  state.rightCenter = toCanvas(config.center_right);
+  state.leftCenter = toCanvas(config.center_right);
+  state.rightCenter = toCanvas(config.center_left);
   if (Number.isFinite(Number(config.crop_size))) {
     state.zoom = Math.round(Number(config.crop_size) * cw / nativeW);
   }
@@ -385,8 +505,9 @@ export function PipSideCamera() {
           <div class="v-asm-card v-asm-card-danger">
             <div class="v-asm-card-title">Setup</div>
             <ul class="v-asm-card-list">
-              <li>Click "Set Left Center", then click the driver's side window; repeat for the right window</li>
-              <li>From the driver camera, the car's LEFT window appears on the right side of the image and vice versa</li>
+              <li>This preview is mirrored to match the normal on-road driver-camera view</li>
+              <li>The LEFT side of the vehicle is always on the LEFT here; the RIGHT side is always on the RIGHT</li>
+              <li>Click the matching side shown in the large labels. Raw camera-coordinate conversion is automatic</li>
               <li>The zoom slider applies to BOTH windows so the preview stays consistent</li>
               <li>At least one window center is required to enable the preview</li>
             </ul>
@@ -410,11 +531,11 @@ export function PipSideCamera() {
           <div class="v-asm-btn-group">
             <button class="${state.armSide === "left" ? "v-asm-btn v-asm-btn-left-active" : "v-asm-btn v-asm-btn-outline-left"}"
                     @click="${setArm}" value="left">
-              ${state.leftCenter ? "Move Left Center" : "Set Left Center"}
+              ${state.leftCenter ? VEHICLE_SIDE_LABELS.left.moveButton : VEHICLE_SIDE_LABELS.left.button}
             </button>
             <button class="${state.armSide === "right" ? "v-asm-btn v-asm-btn-right-active" : "v-asm-btn v-asm-btn-outline-right"}"
                     @click="${setArm}" value="right">
-              ${state.rightCenter ? "Move Right Center" : "Set Right Center"}
+              ${state.rightCenter ? VEHICLE_SIDE_LABELS.right.moveButton : VEHICLE_SIDE_LABELS.right.button}
             </button>
 
             <button class="v-asm-btn v-asm-btn-primary" @click="${saveConfig}" .disabled="${state.loading || (!state.leftCenter && !state.rightCenter)}">
@@ -428,7 +549,7 @@ export function PipSideCamera() {
           </div>
         </div>
 
-        ${state.armSide ? html`<div class="v-asm-mode-banner ${state.armSide === "left" ? "v-asm-mode-left" : "v-asm-mode-right"}"><span>${state.armSide === "left" ? "⬅ Placing Left Center" : "➡ Placing Right Center"}</span><span>Click on the window to place its center point</span></div>` : ""}
+        ${state.armSide ? html`<div class="v-asm-mode-banner ${state.armSide === "left" ? "v-asm-mode-left" : "v-asm-mode-right"}"><span>${state.armSide === "left" ? "⬅ LEFT SIDE OF VEHICLE - LEFT HERE" : "➡ RIGHT SIDE OF VEHICLE - RIGHT HERE"}</span><span>Click the matching side of the mirrored preview</span></div>` : ""}
 
         <div class="v-asm-canvas-wrapper">
           <canvas id="pip-sidecam-canvas" @click="${canvasClick}"></canvas>

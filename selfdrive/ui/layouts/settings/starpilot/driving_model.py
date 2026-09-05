@@ -10,6 +10,7 @@ import time
 
 import pyray as rl
 
+from openpilot.common.file_chunker import get_chunk_name, get_manifest_path
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.starpilot.assets.model_manager import (
   CANCEL_DOWNLOAD_PARAM,
@@ -18,7 +19,9 @@ from openpilot.starpilot.assets.model_manager import (
   MODEL_DOWNLOAD_PARAM,
   ModelManager,
   canonical_model_key,
+  external_gpu_available,
   is_builtin_model_key,
+  model_uses_external_gpu,
   model_key_aliases,
 )
 from openpilot.starpilot.common.starpilot_variables import MODELS_PATH, update_starpilot_toggles
@@ -102,6 +105,7 @@ class ModelCatalogEntry:
   partial: bool
   community_favorite: bool
   user_favorite: bool
+  requires_external_gpu: bool = False
 
 
 def _clean_model_name(name: str) -> str:
@@ -636,6 +640,8 @@ class DrivingModelManagerView(AetherInteractiveMixin, Widget):
       badge_parts.append(tr("Built-in"))
     if entry.partial:
       badge_parts.append(tr("Incomplete"))
+    if entry.requires_external_gpu:
+      badge_parts.append(tr("GPU required"))
     if entry.user_favorite:
       badge_parts.append(tr("Saved"))
     elif entry.community_favorite:
@@ -820,13 +826,13 @@ class StarPilotDrivingModelLayout(_SettingsPage):
     default_key = self._params.get_default_value("Model") or self._params.get_default_value("DrivingModel")
     if isinstance(default_key, bytes):
       default_key = default_key.decode("utf-8", errors="ignore")
-    return canonical_model_key(str(default_key or "").strip()) or "rdf"
+    return canonical_model_key(str(default_key or "").strip()) or "rdf43"
 
   def _default_model_name(self) -> str:
     default_name = self._params.get_default_value("DrivingModelName")
     if isinstance(default_name, bytes):
       default_name = default_name.decode("utf-8", errors="ignore")
-    return _clean_model_name(default_name or "") or "Regret Driven Framework"
+    return _clean_model_name(default_name or "") or "Regret Driven Framework V4"
 
   def _default_model_version(self) -> str:
     default_version = self._params.get_default_value("ModelVersion") or self._params.get_default_value("DrivingModelVersion")
@@ -844,6 +850,21 @@ class StarPilotDrivingModelLayout(_SettingsPage):
     except Exception:
       return set()
 
+  def _artifact_installed(self, filename: str, on_disk_files: set[str]) -> bool:
+    if filename in on_disk_files:
+      return True
+
+    manifest = get_manifest_path(filename)
+    if manifest not in on_disk_files:
+      return False
+
+    try:
+      num_chunks = int((self._model_dir / manifest).read_text().strip())
+    except Exception:
+      return False
+
+    return all(get_chunk_name(filename, idx, num_chunks) in on_disk_files for idx in range(num_chunks))
+
   def _is_model_installed(self, key: str, version: str = "", on_disk_files: set[str] | None = None) -> bool:
     model_key = canonical_model_key(str(key or "").strip())
     if not model_key:
@@ -853,7 +874,7 @@ class StarPilotDrivingModelLayout(_SettingsPage):
       return True
 
     files = on_disk_files if on_disk_files is not None else self._load_on_disk_files()
-    return f"{model_key}_driving_tinygrad.pkl" in files
+    return self._artifact_installed(f"{model_key}_driving_tinygrad.pkl", files)
 
   def _required_files_for_version(self, key: str, version: str) -> list[str]:
     del version
@@ -947,6 +968,7 @@ class StarPilotDrivingModelLayout(_SettingsPage):
         partial=partial,
         community_favorite=(key in self._community_favorites),
         user_favorite=(key in self._user_favorites),
+        requires_external_gpu=model_uses_external_gpu(key),
       )
 
   def _update_model_metadata(self):
@@ -1160,6 +1182,9 @@ class StarPilotDrivingModelLayout(_SettingsPage):
     if entry is None or not entry.installed:
       gui_app.push_widget(alert_dialog(tr("Model is not available on this device.")))
       return False
+    if entry.requires_external_gpu and not external_gpu_available():
+      gui_app.push_widget(alert_dialog(tr("This model requires a detected external GPU.")))
+      return False
     if self._params.get_bool("ModelRandomizer"):
       gui_app.push_widget(alert_dialog(tr("Turn off Model Randomizer to choose a model manually.")))
       return False
@@ -1192,6 +1217,9 @@ class StarPilotDrivingModelLayout(_SettingsPage):
     entry = self._catalog_entries.get(canonical_model_key(model_key))
     if entry is None:
       gui_app.push_widget(alert_dialog(tr("Unknown model.")))
+      return False
+    if entry.requires_external_gpu and not external_gpu_available():
+      gui_app.push_widget(alert_dialog(tr("This model requires a detected external GPU.")))
       return False
     if entry.installed:
       gui_app.push_widget(alert_dialog(tr("Model is already on this device.")))

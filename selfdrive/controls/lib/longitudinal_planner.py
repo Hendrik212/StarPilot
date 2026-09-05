@@ -20,7 +20,14 @@ from openpilot.selfdrive.controls.lib.lead_follow_policy import apply as apply_f
 from openpilot.selfdrive.controls.lib.lead_follow_policy import is_nonurgent_duplicate_vision_follow
 from openpilot.selfdrive.controls.lib.longitudinal_vehicle_tunes import (
   get_far_follow_output_slew_rates,
+  get_follow_prebrake_min_headway,
+  get_force_stop_distance_bias,
+  get_force_stop_handoff_distance,
+  allow_radar_standstill_gap_settle,
   is_gm_silverado_early_follow_lead,
+  is_toyota_rav4_tss2_post_departure_tune,
+  get_toyota_rav4_tss2_early_lead_cap,
+  is_toyota_rav4_tss2_radar_follow_lead,
   get_toyota_sienna_post_departure_restop_cap,
   get_untracked_slow_lead_decel_scale,
 )
@@ -122,6 +129,7 @@ VISION_LEAD_APPROACH_DEFICIT_BUFFER_GAIN = 0.20
 VISION_LEAD_APPROACH_BRAKING_DEFICIT_MIN = 0.75
 VISION_LEAD_APPROACH_BRAKING_MIN_LEAD_BRAKE = 0.45
 VISION_LEAD_APPROACH_BRAKING_FULL_LEAD_BRAKE = 1.20
+PLANNER_SAFETY_WARNING_INTERVAL = 5.0
 VISION_LEAD_APPROACH_BRAKING_FLOOR_MIN_DECEL = 1.30
 VISION_LEAD_APPROACH_BRAKING_FLOOR_MAX_DECEL = 1.75
 VISION_LEAD_APPROACH_CONFIRM_TIME = 0.25
@@ -452,7 +460,9 @@ VISION_CLOSE_RELEASE_HOLD_MIN_LEAD_DELTA = -0.1
 VISION_CLOSE_RELEASE_HOLD_MAX_LEAD_DELTA = 1.5
 VISION_CLOSE_RELEASE_HOLD_MIN_BRAKE = 0.18
 VISION_CLOSE_RELEASE_HOLD_MAX_BRAKE = 0.40
-MANUAL_STOP_RESUME_OVERRIDE_TIME = 3.0
+# Give a driver-initiated launch enough time to clear a stale model stop/light
+# prediction before the stop request is allowed to reassert.
+MANUAL_STOP_RESUME_OVERRIDE_TIME = 6.0
 MANUAL_STOP_RESUME_OVERRIDE_MAX_SPEED = 2.0
 
 def get_planner_v_ego(CP, car_state):
@@ -567,6 +577,7 @@ class LongitudinalPlanner:
     self._uncert_last = 0.0
     self._uncert_last_t = None
     self._panic_bypass_log_t = 0.0
+    self._safety_warning_log_t = 0.0
     self.effective_t_follow = None
     self.vision_low_speed_stop_hold_until = 0.0
     self.vision_lead_approach_confirm_t = 0.0
@@ -1228,7 +1239,10 @@ class LongitudinalPlanner:
       starpilot_car_state = sm["starpilotCarState"]
     except KeyError:
       starpilot_car_state = None
-    accel_pressed = bool(getattr(starpilot_car_state, "accelPressed", False))
+    accel_pressed = bool(
+      getattr(starpilot_car_state, "accelPressed", False) or
+      getattr(sm["carState"], "gasPressed", False)
+    )
     model_should_stop = bool(getattr(sm["modelV2"].action, "shouldStop", False))
     standstill = bool(getattr(sm["carState"], "standstill", False))
     forcing_stop = bool(getattr(sm["starpilotPlan"], "forcingStop", False))
@@ -1974,9 +1988,14 @@ class LongitudinalPlanner:
       not experimental_mode and
       any(is_gm_silverado_early_follow_lead(self.CP, lead, scene_v_ego) for lead in (self.lead_one, self.lead_two))
     )
+    rav4_radar_follow = (
+      not experimental_mode and
+      any(is_toyota_rav4_tss2_radar_follow_lead(self.CP, lead, scene_v_ego)
+          for lead in (self.lead_one, self.lead_two))
+    )
     # StarPilot trackingLead is debounce/model-length based. Keep a raw close-lead
     # safety path so ACC/chill does not ignore a visible lead during that debounce.
-    lead_control_active = tracking_lead or raw_close_lead_control or early_truck_follow
+    lead_control_active = tracking_lead or raw_close_lead_control or early_truck_follow or rav4_radar_follow
     lead_one_active = bool(self.lead_one.status and lead_control_active)
     effective_t_follow = self.get_dynamic_t_follow(sm['starpilotPlan'].tFollow, self.lead_one if lead_one_active else None, v_ego)
 
@@ -2175,15 +2194,21 @@ class LongitudinalPlanner:
     # the line parks us short. Below that the existing v_cruise=0 path finishes the stop,
     # since forcingStopLength is decaying to zero and the obstacle would land behind us.
     force_stop_x = None
-    if sm['starpilotPlan'].forcingStop and sm['starpilotPlan'].forcingStopLength > STOP_DISTANCE:
-      force_stop_x = float(sm['starpilotPlan'].forcingStopLength) + STOP_DISTANCE
+    force_stop_handoff_m = get_force_stop_handoff_distance(self.CP.carFingerprint)
+    if sm['starpilotPlan'].forcingStop and sm['starpilotPlan'].forcingStopLength > force_stop_handoff_m:
+      force_stop_x = (
+        float(sm['starpilotPlan'].forcingStopLength) + STOP_DISTANCE +
+        get_force_stop_distance_bias(self.CP.carFingerprint)
+      )
 
     self.mpc.update(sm['radarState'], v_cruise, x, v, a, j,
                     sm['starpilotPlan'].dangerFactor, effective_t_follow,
                     personality=personality, tracking_lead=lead_control_active,
                     optional_far_lead_comfort=True,
                     smooth_duplicate_vision=nonurgent_duplicate_vision_follow and not panic_bypass,
-                    stop_x=force_stop_x)
+                    stop_x=force_stop_x,
+                    silverado_early_follow=early_truck_follow,
+                    modelV2=sm['modelV2'])
 
     self.a_desired_trajectory_full = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
@@ -2198,10 +2223,12 @@ class LongitudinalPlanner:
     # Safety checks for rubber-banding mitigation
     max_jerk = np.max(np.abs(self.mpc.j_solution))
     max_accel_change = np.max(np.abs(np.diff(self.mpc.a_solution)))
-    if max_jerk > 5.0:  # m/s^3
-      cloudlog.warning(f"High jerk detected: {max_jerk:.2f} m/s^3")
-    if max_accel_change > 2.0:  # m/s^2
-      cloudlog.warning(f"High acceleration change: {max_accel_change:.2f} m/s^2")
+    if (max_jerk > 5.0 or max_accel_change > 2.0) and now_t - self._safety_warning_log_t >= PLANNER_SAFETY_WARNING_INTERVAL:
+      cloudlog.warning(
+        f"Longitudinal planner output discontinuity: jerk={max_jerk:.2f} m/s^3, "
+        f"accel_change={max_accel_change:.2f} m/s^2"
+      )
+      self._safety_warning_log_t = now_t
 
     # Interpolate 0.05 seconds and save as starting point for next iteration
     a_prev = self.a_desired
@@ -2212,7 +2239,7 @@ class LongitudinalPlanner:
     if lead_one_active:
       rel_v = max(0.0, v_ego - self.lead_one.vLead)
       # dynamic time headway adds a small buffer when uncertainty is elevated
-      base_th = max(1.6, effective_t_follow)
+      base_th = get_follow_prebrake_min_headway(self.CP, effective_t_follow)
       th = base_th + 0.6 * max(0.0, uncertainty - 0.42)
       desired_gap = th * v_ego
       if (self.lead_dist_f is not None and self.lead_dist_f < desired_gap and rel_v > 0.5):
@@ -2316,11 +2343,17 @@ class LongitudinalPlanner:
       output_a_target = min(output_a_target, approach_lift_cap)
 
     close_lead_caps = []
+    rav4_early_lead_caps = []
     tracked_vision_approach_caps = []
     vision_low_speed_stop_active = False
     vision_brake_cap_active = False
     if lead_control_active:
       for lead in (self.lead_one, self.lead_two):
+        rav4_early_lead_cap = get_toyota_rav4_tss2_early_lead_cap(
+          self.CP, lead, v_ego, output_accel_min,
+        )
+        if rav4_early_lead_cap is not None:
+          rav4_early_lead_caps.append(rav4_early_lead_cap)
         cap = self.get_close_lead_brake_cap(lead, v_ego, output_accel_min)
         if cap is not None:
           close_lead_caps.append(cap)
@@ -2442,7 +2475,12 @@ class LongitudinalPlanner:
       slow_creep_depart_detected and
       self.slow_creep_lead_depart_elapsed >= STANDSTILL_LEAD_CREEP_RELEASE_CONFIRM_TIME
     )
-    radar_gap_settle_active = self.update_radar_standstill_gap_settle(sm, standstill_nudge_gap)
+    radar_gap_settle_active = False
+    if allow_radar_standstill_gap_settle(self.CP):
+      radar_gap_settle_active = self.update_radar_standstill_gap_settle(sm, standstill_nudge_gap)
+    else:
+      self.radar_standstill_gap_settle_elapsed = 0.0
+      self.radar_standstill_gap_settle_active = False
 
     standstill_stopped_lead_guard_cap = None
     standstill_guard_lead_present = any(bool(getattr(lead, "status", False)) for lead in (self.lead_one, self.lead_two))
@@ -2655,6 +2693,12 @@ class LongitudinalPlanner:
     post_departure_active = self.post_departure_follow_settle_active(
       policy_lead, scene_v_ego, effective_t_follow,
     )
+    # The RAV4's post-departure path used to bypass the ordinary follow cap for
+    # the entire settle latch. When a slow lead changed lanes, that let the
+    # cruise branch request full acceleration before the next lead was stable.
+    # Keep the normal catch-up cap on this car; urgent braking remains outside
+    # this comfort policy and is still allowed through unchanged.
+    post_departure_bypass = post_departure_active and not is_toyota_rav4_tss2_post_departure_tune(self.CP)
     follow_result = apply_follow_policy(
       self.lead_one,
       self.lead_two,
@@ -2665,7 +2709,7 @@ class LongitudinalPlanner:
       previous_target=prev_output_a_target,
       raw_target=output_a_target,
       tracking=tracking_lead,
-      post_departure=post_departure_active,
+      post_departure=post_departure_bypass,
       blocked=bool(output_should_stop or vision_low_speed_stop_active or close_lead_caps),
       panic_bypass=panic_bypass,
     )
@@ -2713,6 +2757,11 @@ class LongitudinalPlanner:
     if close_final_guard_cap is not None:
       self.a_desired = min(self.a_desired, close_final_guard_cap)
       output_a_target = min(output_a_target, close_final_guard_cap)
+
+    if rav4_early_lead_caps:
+      rav4_early_lead_cap = min(rav4_early_lead_caps)
+      self.a_desired = min(self.a_desired, rav4_early_lead_cap)
+      output_a_target = min(output_a_target, rav4_early_lead_cap)
 
     if close_release_hold_cap is not None:
       self.a_desired = min(self.a_desired, close_release_hold_cap)
@@ -2856,9 +2905,17 @@ class LongitudinalPlanner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = sm['radarState'].leadOne.status
+    # LongControl needs to know about whichever lead MPC is following. Using
+    # leadOne only leaves the stop-release guard blind when source=lead1.
+    selected_lead = sm['radarState'].leadTwo if self.mpc.source == "lead1" else sm['radarState'].leadOne
+    longitudinalPlan.hasLead = bool(selected_lead.status)
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
+
+    longitudinalPlan.leadTrajectoryX0 = self.mpc.lead_xv_0[:, 0].tolist()
+    longitudinalPlan.leadTrajectoryV0 = self.mpc.lead_xv_0[:, 1].tolist()
+    longitudinalPlan.leadTrajectoryX1 = self.mpc.lead_xv_1[:, 0].tolist()
+    longitudinalPlan.leadTrajectoryV1 = self.mpc.lead_xv_1[:, 1].tolist()
 
     longitudinalPlan.aTarget = float(self.output_a_target)
     force_stop_handoff = bool(

@@ -2,6 +2,7 @@ from cereal import car
 from opendbc.car import apply_hysteresis
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
+from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 
 ButtonType = car.CarState.ButtonEvent.Type
 
@@ -15,7 +16,7 @@ DECREASE_INACTIVE_TIMER = 0.05
 LEAD_INCREASE_INACTIVE_TIMER = 0.05
 MANUAL_BUTTON_INACTIVE_TIMER = 0.5
 LEAD_RECOVERY_LOOKAHEAD_POINTS = 4
-LEAD_RECOVERY_HOLD_BUFFER_MS = 0.5 * CV.MPH_TO_MS
+LEAD_RECOVERY_HOLD_BUFFER_MS = 1.5 * CV.MPH_TO_MS
 LEAD_COAST_BUFFER_MS = 1.0 * CV.MPH_TO_MS
 LEAD_EXTRA_COAST_BUFFER_FACTOR = 0.6
 LEAD_EXTRA_COAST_BUFFER_MAX_MS = 3.0 * CV.MPH_TO_MS
@@ -26,9 +27,9 @@ LEAD_PROACTIVE_COAST_HEADWAY_MAX_S = 4.0
 LEAD_DEPARTURE_REL_SPEED_MIN_MS = 1.0 * CV.MPH_TO_MS
 LEAD_DEPARTURE_HEADWAY_MIN_S = 1.8
 LEAD_DEPARTURE_HEADWAY_MAX_S = 4.5
-LEAD_DEPARTURE_BOOST_MIN_MS = 0.75 * CV.MPH_TO_MS
-LEAD_DEPARTURE_BOOST_MAX_MS = 1.5 * CV.MPH_TO_MS
-LEAD_DEPARTURE_BOOST_FACTOR = 0.35
+LEAD_DEPARTURE_BOOST_MIN_MS = 1.25 * CV.MPH_TO_MS
+LEAD_DEPARTURE_BOOST_MAX_MS = 3.0 * CV.MPH_TO_MS
+LEAD_DEPARTURE_BOOST_FACTOR = 0.50
 LEAD_DEPARTURE_PLAN_POINTS = 3
 
 CRUISE_BUTTON_TIMERS = {
@@ -50,6 +51,10 @@ def select_redneck_target_speed(v_cruise_kph: float, speed_cluster_ms: float,
   target_speed_ms = float(speed_cluster_ms)
   if slc_target_speed_ms > 0:
     target_speed_ms = float(slc_target_speed_ms)
+    # SLC is an upper bound for the button-spammed stock setpoint. A driver-set
+    # speed below the posted target must still be able to slow the car down.
+    if 0 < v_cruise_kph < V_CRUISE_UNSET:
+      target_speed_ms = min(target_speed_ms, float(v_cruise_kph) * CV.KPH_TO_MS)
   elif v_cruise_kph > 0:
     target_speed_ms = float(v_cruise_kph) * CV.KPH_TO_MS
   elif starpilot_target_speed_ms > 0:

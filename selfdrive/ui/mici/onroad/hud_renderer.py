@@ -4,10 +4,12 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.starpilot.torque_bar import TorqueBar
+from openpilot.selfdrive.ui.onroad.starpilot.rivian_lateral_mode import rivian_lateral_mode
 from openpilot.selfdrive.ui.mici.onroad.speed_limit_utils import resolve_display_speed_limit_ms
 from openpilot.selfdrive.ui.onroad.starpilot.navigation_card import NavigationCardRenderer
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.utils import draw_circle_gradient_compat
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
@@ -162,6 +164,7 @@ class HudRenderer(Widget):
 
     self._wheel_alpha_filter = FirstOrderFilter(0, 0.05, 1 / gui_app.target_fps)
     self._wheel_y_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
+    self._wheel_tint: rl.Color | None = None
 
     self._set_speed_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._egpu_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
@@ -185,10 +188,13 @@ class HudRenderer(Widget):
       self.is_cruise_set = False
       self.set_speed = SET_SPEED_NA
       self.speed = 0.0
+      self._wheel_tint = None
       return
 
     controls_state = sm['controlsState']
     car_state = sm['carState']
+    rivian_lateral_mode.update()
+    self._wheel_tint = rivian_lateral_mode.wheel_tint
 
     v_cruise_cluster = car_state.vCruiseCluster
     set_speed = (
@@ -198,8 +204,8 @@ class HudRenderer(Widget):
     if (engaged and not self._engaged and not ui_state.usbgpu_loading and ui_state.usbgpu_active is not True and
         sm.recv_frame['modelV2'] > ui_state.started_frame):
       self._small_model_engaged = True
-    if engaged and not self._engaged:
-      self._egpu_fade_time = rl.get_time()
+    if engaged != self._engaged:
+      self._egpu_fade_time = rl.get_time() if engaged else 0
     if (set_speed != self.set_speed and engaged) or (engaged and not self._engaged):
       self._set_speed_changed_time = rl.get_time()
     self._engaged = engaged
@@ -215,18 +221,18 @@ class HudRenderer(Widget):
 
     if sm.recv_frame["starpilotPlan"] >= ui_state.started_frame:
       starpilot_plan = sm["starpilotPlan"]
-      self._show_speed_limit = ui_state.params.get_bool("ShowSpeedLimits")
+      self._show_speed_limit = ui_state.ui_params.get_bool("ShowSpeedLimits")
       if self._show_speed_limit:
         dashboard_speed_limit = sm["starpilotCarState"].dashboardSpeedLimit if sm.valid.get("starpilotCarState", False) else 0.0
-        vision_speed_limit = ui_state.params_memory.get_float("VisionSpeedLimit") if ui_state.params.get_bool("VisionSpeedLimitDetection") else 0.0
-        self._show_speed_limit_offset = ui_state.params.get_bool("ShowSLCOffset")
-        primary_priority = ui_state.params.get("SLCPriority1", encoding='utf-8') or "Map Data"
-        secondary_priority = ui_state.params.get("SLCPriority2", encoding='utf-8') or "None"
+        vision_speed_limit = ui_state.params_memory.get_float("VisionSpeedLimit") if ui_state.ui_params.get_bool("VisionSpeedLimitDetection") else 0.0
+        self._show_speed_limit_offset = ui_state.ui_params.get_bool("ShowSLCOffset")
+        primary_priority = ui_state.ui_params.get("SLCPriority1", encoding='utf-8') or "Map Data"
+        secondary_priority = ui_state.ui_params.get("SLCPriority2", encoding='utf-8') or "None"
         source_limits = {
           "Dashboard": dashboard_speed_limit,
           "Map Data": starpilot_plan.slcMapSpeedLimit,
           "Vision": vision_speed_limit,
-          "Mapbox": starpilot_plan.slcMapboxSpeedLimit if ui_state.params.get_bool("SLCMapboxFiller") else 0.0,
+          "Mapbox": starpilot_plan.slcMapboxSpeedLimit if ui_state.ui_params.get_bool("SLCMapboxFiller") else 0.0,
         }
         resolved_speed_limit = resolve_display_speed_limit_ms(
           slc_speed_limit=starpilot_plan.slcSpeedLimit,
@@ -282,7 +288,7 @@ class HudRenderer(Widget):
 
   def render_foreground(self) -> None:
     """Draw HUD elements that should sit above alerts."""
-    if ui_state.params.get_bool("EnableTorqueBarWidget", default=True):
+    if ui_state.ui_params.get_bool("EnableTorqueBarWidget", default=True):
       self._torque_bar.render(self._rect)
 
     if self.is_cruise_set:
@@ -335,9 +341,7 @@ class HudRenderer(Widget):
     if icon is not self._egpu_icon:
       self._egpu_fade_time = rl.get_time()
       self._egpu_icon = icon
-    alpha = self._egpu_alpha_filter.update(
-      loading or (0 < rl.get_time() - self._egpu_fade_time < SET_SPEED_PERSISTENCE and self._engaged)
-    )
+    alpha = self._egpu_alpha_filter.update(loading or 0 < rl.get_time() - self._egpu_fade_time < SET_SPEED_PERSISTENCE)
     if alpha < 1e-2:
       return
 
@@ -380,7 +384,8 @@ class HudRenderer(Widget):
     origin = (wheel_txt.width / 2, wheel_txt.height / 2)
 
     # color and draw
-    color = rl.Color(255, 255, 255, int(self._wheel_alpha_filter.x))
+    base_color = self._wheel_tint if self._wheel_tint is not None and not self._show_wheel_critical else rl.Color(255, 255, 255, 255)
+    color = rl.Color(base_color.r, base_color.g, base_color.b, int(self._wheel_alpha_filter.x))
     rl.draw_texture_pro(wheel_txt, src_rect, dest_rect, origin, rotation, color)
 
     if self._show_wheel_critical:
@@ -402,8 +407,8 @@ class HudRenderer(Widget):
 
     # draw drop shadow
     circle_radius = 162 // 2
-    rl.draw_circle_gradient(int(x + circle_radius), int(y + circle_radius), circle_radius,
-                            rl.Color(0, 0, 0, int(255 / 2 * alpha)), rl.BLANK)
+    draw_circle_gradient_compat(x + circle_radius, y + circle_radius, circle_radius,
+                                rl.Color(0, 0, 0, int(255 / 2 * alpha)), rl.BLANK)
 
     set_speed_color = rl.Color(255, 255, 255, int(255 * 0.9 * alpha))
     max_color = rl.Color(255, 255, 255, int(255 * 0.9 * alpha))
@@ -516,7 +521,7 @@ class HudRenderer(Widget):
       return
 
     sign_alpha = 72 if self._speed_limit_overridden and self._pending_speed_limit <= 0 else 255
-    use_vienna_speed_limit = ui_state.params.get_bool("UseVienna")
+    use_vienna_speed_limit = ui_state.ui_params.get_bool("UseVienna")
     speed_text = str(round(display_speed))
     offset_text = ""
     if self._show_speed_limit_offset and not self._speed_limit_overridden:
@@ -584,7 +589,7 @@ class HudRenderer(Widget):
       self._prompt_accept_rect = rl.Rectangle(0, 0, 0, 0)
       return
 
-    use_vienna_speed_limit = ui_state.params.get_bool("UseVienna")
+    use_vienna_speed_limit = ui_state.ui_params.get_bool("UseVienna")
     sign_width = SPEED_LIMIT_PROMPT_EU_SIGN_SIZE if use_vienna_speed_limit else SPEED_LIMIT_PROMPT_US_SIGN_WIDTH
     sign_height = SPEED_LIMIT_PROMPT_EU_SIGN_SIZE if use_vienna_speed_limit else SPEED_LIMIT_PROMPT_US_SIGN_HEIGHT
     button_size = SPEED_LIMIT_PROMPT_BUTTON_SIZE
@@ -624,7 +629,7 @@ class HudRenderer(Widget):
     center = rl.Vector2(button_rect.x + button_rect.width / 2, button_rect.y + button_rect.height / 2)
     radius = min(button_rect.width, button_rect.height) / 2
 
-    rl.draw_circle_gradient(int(center.x), int(center.y), radius, rl.Color(0, 0, 0, 90), rl.BLANK)
+    draw_circle_gradient_compat(center.x, center.y, radius, rl.Color(0, 0, 0, 90), rl.BLANK)
     rl.draw_circle(int(center.x), int(center.y), radius, fill)
     rl.draw_ring(center, radius - 6, radius, 0, 360, 48, outline)
 
@@ -648,7 +653,7 @@ class HudRenderer(Widget):
     title_pos = rl.Vector2(card_rect.x + card_rect.width / 2 - title_size.x / 2, card_rect.y + 18)
     rl.draw_text_ex(self._font_semi_bold, title_text, title_pos, 28, 0, rl.Color(255, 255, 255, 235))
 
-    use_vienna_speed_limit = ui_state.params.get_bool("UseVienna")
+    use_vienna_speed_limit = ui_state.ui_params.get_bool("UseVienna")
     speed_text = str(round(self._pending_speed_limit))
     sign_rect = self._prompt_sign_rect
 
