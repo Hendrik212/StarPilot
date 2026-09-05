@@ -45,8 +45,12 @@ class CarControllerParams:
       self.STEER_DRIVER_MULTIPLIER = 2
       self.STEER_THRESHOLD = 100
       if vEgoRaw < 15.0:  # below ~34 mph - more aggressive for tight turns
-        self.STEER_DELTA_UP = 10
-        self.STEER_DELTA_DOWN = 8
+        if CP.carFingerprint == CAR.KIA_CARNIVAL_HEV_4TH_GEN:
+          self.STEER_DELTA_UP = 2
+          self.STEER_DELTA_DOWN = 3
+        else:
+          self.STEER_DELTA_UP = 10
+          self.STEER_DELTA_DOWN = 8
       else:
         self.STEER_DELTA_UP = 2
         self.STEER_DELTA_DOWN = 3
@@ -111,6 +115,7 @@ class HyundaiSafetyFlags(IntFlag):
 
 
 class HyundaiStarPilotSafetyFlags(IntFlag):
+  AOL_MAIN_LKAS_ON_ENGAGE = 128
   AOL_MAIN_LKAS_SYNC = 32
   HAS_LDA_BUTTON = 1024
   AOL_LKAS_ON_ENGAGE = 2048
@@ -119,6 +124,7 @@ class HyundaiStarPilotSafetyFlags(IntFlag):
 class HyundaiStarPilotFlags(IntFlag):
   SPEED_LIMIT_AVAILABLE = 1
   MAIN_CRUISE_STATE_TRACKING = 2 ** 2
+  HAS_LKAS12 = 2 ** 9
 
 
 class HyundaiFlags(IntFlag):
@@ -872,6 +878,16 @@ class CAR(Platforms):
     flags=HyundaiFlags.EV | HyundaiFlags.CANFD_ANGLE_STEERING,
     radar_dbc=HYUNDAI_MRR35_RADAR_DBC,
   )
+  GENESIS_GV70_2026 = HyundaiCanFDPlatformConfig(
+    [
+      HyundaiCarDocs("Genesis GV70 (3.5T Sport Prestige Trim, with HDA II & LFA2) 2026",
+                     "Highway Driving Assist II & Lane Follow Assist 2",
+                     car_parts=CarParts.common([CarHarness.hyundai_m])),
+    ],
+    GENESIS_GV70_1ST_GEN.specs,
+    flags=HyundaiFlags.CANFD_ANGLE_STEERING,
+    radar_dbc=HYUNDAI_MRR35_RADAR_DBC,
+  )
   GENESIS_G80 = HyundaiPlatformConfig(
     [HyundaiCarDocs("Genesis G80 2018-19", "All", car_parts=CarParts.common([CarHarness.hyundai_h]))],
     CarSpecs(mass=2060, wheelbase=3.01, steerRatio=16.5),
@@ -929,6 +945,11 @@ class CAR(Platforms):
     [HyundaiNonSccCarDocs("Hyundai Kona Electric Non-SCC 2019", car_parts=CarParts.common([CarHarness.hyundai_g]))],
     HYUNDAI_KONA_EV.specs,
     flags=HyundaiFlags.EV | HyundaiFlags.ALT_LIMITS,
+  )
+  KIA_RAY_EV = HyundaiNonSccPlatformConfig(
+    [HyundaiNonSccCarDocs("Kia Ray EV 2025", car_parts=CarParts.common([CarHarness.hyundai_h]))],
+    CarSpecs(mass=1295, wheelbase=2.52, steerRatio=14.5),
+    flags=HyundaiFlags.EV | HyundaiFlags.CHECKSUM_CRC8,
   )
   KIA_CEED_PHEV_2022_NON_SCC = HyundaiNonSccPlatformConfig(
     [HyundaiNonSccCarDocs("Kia Ceed Plug-in Hybrid Non-SCC 2022", car_parts=CarParts.common([CarHarness.hyundai_i]))],
@@ -1080,7 +1101,7 @@ PART_NUMBER_FW_PATTERN = re.compile(b'(?<=[0-9][.,][0-9]{2} )([0-9]{5}[-/]?[A-Z]
 # We've seen both ICE and hybrid for these platforms, and they have hybrid descriptors (e.g. MQ4 vs MQ4H)
 CANFD_FUZZY_WHITELIST = {CAR.KIA_SORENTO_4TH_GEN, CAR.KIA_SORENTO_HEV_4TH_GEN, CAR.KIA_K8_HEV_1ST_GEN,
                          CAR.KIA_CARNIVAL_4TH_GEN, CAR.KIA_CARNIVAL_2025, CAR.KIA_CARNIVAL_HEV_4TH_GEN,
-                         CAR.KIA_SORENTO_HEV_4TH_GEN_LFA2}
+                         CAR.KIA_SORENTO_HEV_4TH_GEN_LFA2, CAR.GENESIS_GV70_2026}
 
 # List of ECUs expected to have platform codes, camera and radar should exist on all cars
 # TODO: use abs, it has the platform code and part number on many platforms
@@ -1183,6 +1204,7 @@ CANFD_SECURITYACCESS_CAR = {
 }
 CANFD_UNSUPPORTED_LONGITUDINAL_CAR = CAR.with_flags(HyundaiFlags.CANFD_NO_RADAR_DISABLE) - CANFD_SECURITYACCESS_CAR  # TODO: merge with UNSUPPORTED_LONGITUDINAL_CAR
 CANFD_ANGLE_LONGITUDINAL_CAR = {CAR.KIA_EV9, CAR.HYUNDAI_IONIQ_5_PE}
+CANFD_ALT_BUTTONS_RESUME_CAR = {CAR.KIA_CARNIVAL_2025, CAR.KIA_CARNIVAL_HEV_4TH_GEN}
 CANFD_CORNER_RADAR_BSM_CAR = {CAR.HYUNDAI_IONIQ_6, CAR.HYUNDAI_IONIQ_5_PE, CAR.KIA_EV9}
 CANFD_RADAR_LIVE_LONGITUDINAL_CAR = {
   CAR.HYUNDAI_IONIQ_5, CAR.HYUNDAI_IONIQ_5_PE, CAR.HYUNDAI_IONIQ_6, CAR.KIA_EV6, CAR.KIA_EV9, CAR.GENESIS_GV60_EV_1ST_GEN,
@@ -1213,6 +1235,9 @@ NON_SCC_CAR = CAR.with_flags(HyundaiFlags.NON_SCC)
 #       HyundaiFlags.CANFD_RADAR_SCC | HyundaiFlags.CANFD_NO_RADAR_DISABLE | )
 UNSUPPORTED_LONGITUDINAL_CAR = CAR.with_flags(HyundaiFlags.LEGACY) | CAR.with_flags(HyundaiFlags.UNSUPPORTED_LONGITUDINAL)
 
-LEGACY_LONGITUDINAL_CAR = {CAR.KIA_XCEED_PHEV}
+LEGACY_LONGITUDINAL_CAR = {
+  CAR.GENESIS_G80,
+  CAR.KIA_XCEED_PHEV,
+}
 
 DBC = CAR.create_dbc_map()

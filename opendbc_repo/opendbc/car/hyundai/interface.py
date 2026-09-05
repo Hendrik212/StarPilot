@@ -31,7 +31,7 @@ ENABLE_BUTTONS = (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.can
 # Track when ECU disable happened - used to permanently suppress CAN errors from disabled ECU
 ECU_DISABLE_TIMESTAMP = 0.0
 KONA_NON_SCC_FCA_RADAR_ADDR = 0x602
-KIA_EV9_ACCEL_MAX = 2.5
+KIA_EV9_ACCEL_MAX = 2.2
 
 
 def apply_platform_longitudinal_params(ret: structs.CarParams) -> None:
@@ -48,7 +48,7 @@ def apply_platform_longitudinal_params(ret: structs.CarParams) -> None:
 
 def apply_kia_ev6_gt_line_longitudinal_params(ret: structs.CarParams) -> None:
   ret.startAccel = 1.4
-  ret.longitudinalActuatorDelay = 0.35
+  ret.longitudinalActuatorDelay = 0.5
   ret.vEgoStarting = 0.5
 
 
@@ -209,7 +209,9 @@ class CarInterface(CarInterfaceBase):
       ret.enableBsm = 0x58b in fingerprint[CAN.ECAN]
 
       # Send LFA message on cars with HDA
-      if 0x485 in fingerprint[CAN.CAM]:
+      if 0x485 in fingerprint[CAN.CAM] and (
+          candidate != CAR.KIA_RAY_EV or fingerprint[CAN.CAM][0x485] == 4
+      ):
         ret.flags |= HyundaiFlags.SEND_LFA.value
 
       # These cars use the FCA11 message for the AEB and FCW signals, all others use SCC12

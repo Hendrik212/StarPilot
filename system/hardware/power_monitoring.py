@@ -19,6 +19,7 @@ MAX_TIME_OFFROAD_S = 30*3600
 MIN_ON_TIME_S = 3600
 DELAY_SHUTDOWN_TIME_S = 300 # Wait at least DELAY_SHUTDOWN_TIME_S seconds after offroad_time to shutdown.
 VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S = 60
+VOLTAGE_SHUTDOWN_SUSTAINED_TIME_S = 30.0
 
 class PowerMonitoring:
   def __init__(self):
@@ -29,12 +30,19 @@ class PowerMonitoring:
     self.next_pulsed_measurement_time = None
     self.car_voltage_mV = 12e3                  # Low-passed version of peripheralState voltage
     self.car_voltage_instant_mV = 12e3          # Last value of peripheralState voltage
+    self.low_voltage_start_time = None          # Monotonic timestamp when low voltage was first observed
     self.integration_lock = threading.Lock()
 
-    car_battery_capacity_uWh = self.params.get("CarBatteryCapacity") or 0
+    # Preserve an exhausted persisted value so the shutdown policy can act on it.
+    # A missing or malformed value is treated as a newly initialized battery.
+    car_battery_capacity_uWh = self.params.get_int("CarBatteryCapacity", default=CAR_BATTERY_CAPACITY_uWh)
+    if car_battery_capacity_uWh < 0:
+      car_battery_capacity_uWh = CAR_BATTERY_CAPACITY_uWh
 
-    # Reset capacity if it's low
-    self.car_battery_capacity_uWh = max((CAR_BATTERY_CAPACITY_uWh / 10), car_battery_capacity_uWh)
+    # Reset low but non-zero estimates; zero means the estimate is exhausted.
+    self.car_battery_capacity_uWh = (
+      0 if car_battery_capacity_uWh == 0 else max((CAR_BATTERY_CAPACITY_uWh / 2), car_battery_capacity_uWh)
+    )
 
   # Calculation tick
   def calculate(self, voltage: int | None, ignition: bool):
@@ -110,14 +118,28 @@ class PowerMonitoring:
   def shutdown_reason(self, ignition: bool, in_car: bool, offroad_timestamp: float | None,
                       started_seen: bool, starpilot_toggles: SimpleNamespace) -> str | None:
     if offroad_timestamp is None:
+      self.low_voltage_start_time = None
       return None
 
     now = time.monotonic()
     offroad_time = (now - offroad_timestamp)
+
     # VW camper: keep device alive while parked; shut down only to protect the starter battery.
-    # Bypasses StarPilot's low_voltage_shutdown/device_shutdown_time toggles and battery-capacity
-    # trigger on purpose - reuses their "low_voltage" reason string for consistent logging.
-    reason = "low_voltage" if self.car_voltage_mV / 1e3 <= 11.6 else None
+    # Bypasses StarPilot's configurable cutoff/device_shutdown_time/battery-capacity triggers on
+    # purpose, but keeps Dom's low-voltage debounce so a brief voltage dip doesn't false-trigger.
+    is_below_voltage = self.car_voltage_mV <= (11.6 * 1e3)
+
+    if is_below_voltage and offroad_time > VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S:
+      if self.low_voltage_start_time is None:
+        self.low_voltage_start_time = now
+      low_voltage_sustained_time = now - self.low_voltage_start_time
+      low_voltage_shutdown = low_voltage_sustained_time >= VOLTAGE_SHUTDOWN_SUSTAINED_TIME_S
+    else:
+      self.low_voltage_start_time = None
+      low_voltage_shutdown = False
+
+    reason = "low_voltage" if low_voltage_shutdown else None
+
     should_shutdown = reason is not None
     should_shutdown &= not ignition
     should_shutdown &= (not self.params.get_bool("DisablePowerDown"))

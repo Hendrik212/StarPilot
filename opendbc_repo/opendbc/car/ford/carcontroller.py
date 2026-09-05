@@ -18,6 +18,26 @@ AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation. higher actual roll 
 MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL - (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~2.4 m/s^2
 
 
+class FordStockCruiseButton:
+  """Resolve Ford's context-sensitive cancel/resume switch for stock ACC."""
+
+  def __init__(self):
+    self.pressed = False
+    self.cancel = False
+    self.resume = False
+
+  def update(self, pressed: bool, cruise_available: bool, cruise_enabled: bool) -> tuple[bool, bool]:
+    if pressed and not self.pressed:
+      self.cancel = cruise_available and cruise_enabled
+      self.resume = cruise_available and not cruise_enabled
+    elif not pressed:
+      self.cancel = False
+      self.resume = False
+
+    self.pressed = pressed
+    return self.cancel, self.resume
+
+
 def apply_ford_angle(desired_angle_deg: float, current_angle_deg: float) -> float:
   relative_angle = desired_angle_deg - current_angle_deg
   return float(np.clip(relative_angle, -5.8, 5.8))
@@ -85,6 +105,7 @@ class CarController(CarControllerBase):
     self.ford_lateral = None if CP.flags & FordFlags.LKA_STEERING else FordLateralController(CP)
     self.ford_shadow_curvature = 0.0
     self.ford_lateral_announced_mode = FordLateralMode.native
+    self.stock_cruise_button = FordStockCruiseButton()
 
   def update(self, CC, CS, now_nanos, starpilot_toggles):
     can_sends = []
@@ -100,9 +121,23 @@ class CarController(CarControllerBase):
       self.ford_lateral.update_inputs()
 
     ### acc buttons ###
+    stock_cancel = False
+    stock_resume = False
+    if not self.CP.openpilotLongitudinalControl:
+      stock_cancel, stock_resume = self.stock_cruise_button.update(
+        bool(CS.buttons_stock_values["CcAslButtnCnclResPress"]),
+        CS.out.cruiseState.available,
+        CS.out.cruiseState.enabled,
+      )
+
     if CC.cruiseControl.cancel:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, cancel=True))
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.main, CS.buttons_stock_values, cancel=True))
+    elif (stock_cancel or stock_resume) and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
+      can_sends.append(fordcan.create_button_msg(
+        self.packer, self.CAN.camera, CS.buttons_stock_values, cancel=stock_cancel, resume=stock_resume))
+      can_sends.append(fordcan.create_button_msg(
+        self.packer, self.CAN.main, CS.buttons_stock_values, cancel=stock_cancel, resume=stock_resume))
     elif CC.cruiseControl.resume and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.camera, CS.buttons_stock_values, resume=True))
       can_sends.append(fordcan.create_button_msg(self.packer, self.CAN.main, CS.buttons_stock_values, resume=True))
@@ -255,9 +290,15 @@ class CarController(CarControllerBase):
 
     if (self.frame % CarControllerParams.ACC_UI_STEP) == 0 or send_ui:
       show_distance_bars = self.frame - self.distance_bar_frame < 400
+      hands_free_cluster = bool(
+        self.ford_lateral is not None
+        and self.ford_lateral.mode != FordLateralMode.native
+        and self.ford_lateral.mode == self.ford_lateral_announced_mode
+        and self.ford_lateral.hands_free_cluster_enabled)
       can_sends.append(fordcan.create_acc_ui_msg(self.packer, self.CAN, self.CP, main_on, CC.latActive,
                                                  fcw_alert, CS.out.cruiseState.standstill, show_distance_bars,
-                                                 hud_control, CS.acc_tja_status_stock_values))
+                                                 hud_control, CS.acc_tja_status_stock_values,
+                                                 hands_free_cluster))
 
     self.main_on_last = main_on
     self.lkas_enabled_last = CC.latActive
