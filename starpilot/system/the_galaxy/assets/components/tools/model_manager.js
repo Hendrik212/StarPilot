@@ -5,12 +5,15 @@ const state = reactive({
   refreshing: false,
   error: "",
   actionBusy: false,
+  selectionUncertain: true,
   sortMode: "release_date",
   communityFavoriteFilter: "all",
   userFavoriteFilter: "all",
   allowGpuDownloadsWithoutGpu: false,
   models: [],
   currentModel: "",
+  activeSmallModel: "",
+  activeBigModel: "",
   summary: { installed: 0, missing: 0, total: 0 },
   status: {
     modelToDownload: "",
@@ -25,7 +28,10 @@ const state = reactive({
 
 let initialized = false;
 let pollingHandle = null;
-let statusInFlight = false;
+let statusInFlight = null;
+let statusGeneration = 0;
+let viewGeneration = 0;
+let selectionWrite = null;
 let lastStatusSignature = "";
 
 const REQUEST_TIMEOUT_MS = 20000;
@@ -158,9 +164,10 @@ function getReleaseOrderedModels() {
   return getFilteredModels().sort(modelSortCompare);
 }
 
-function getInstalledModels() {
+function getInstalledModels(profile = "") {
   return state.models
     .filter(model => model && typeof model === "object" && !!model.installed)
+    .filter(model => !profile || (!!model.requiresGpu === (profile === "big")))
     .sort(modelSortCompare);
 }
 
@@ -178,6 +185,13 @@ function getCurrentModelName() {
   if (!match) return current;
 
   return safeText(match.label, current);
+}
+
+function getModelName(modelKey, fallback = "none selected") {
+  const key = safeText(modelKey, "");
+  if (!key) return fallback;
+  const match = state.models.find(model => safeText(model?.value, "") === key);
+  return match ? safeText(match.label, key) : key;
 }
 
 async function fetchJson(url, options = {}) {
@@ -206,11 +220,15 @@ async function fetchJson(url, options = {}) {
 }
 
 async function fetchStatus() {
-  if (statusInFlight) return;
-  statusInFlight = true;
+  const generation = statusGeneration;
+  if (statusInFlight === generation) return;
+  statusInFlight = generation;
 
   try {
+    if (selectionWrite) await selectionWrite.catch(() => {});
+    if (generation !== statusGeneration || !isModelRouteActive()) return;
     const payload = await fetchJson("/api/models/status");
+    if (generation !== statusGeneration || !isModelRouteActive()) return;
 
     const models = Array.isArray(payload.models)
       ? payload.models.filter(model => model && typeof model === "object")
@@ -218,6 +236,8 @@ async function fetchStatus() {
 
     state.models = models;
     state.currentModel = safeText(payload.currentModel, "");
+    state.activeSmallModel = safeText(payload.activeSmallModel, "");
+    state.activeBigModel = safeText(payload.activeBigModel, "");
 
     const summary = payload.summary && typeof payload.summary === "object" ? payload.summary : {};
     state.summary = {
@@ -237,10 +257,20 @@ async function fetchStatus() {
     };
 
     state.error = "";
+    state.selectionUncertain = false;
+    queueMicrotask(() => {
+      if (generation !== statusGeneration || !isModelRouteActive()) return;
+      for (const profile of ["small", "big"]) {
+        const select = document.getElementById(`mm-active-${profile}-model-select`);
+        if (select) select.value = profile === "big" ? state.activeBigModel : state.activeSmallModel;
+      }
+    });
 
     const signature = [
       state.models.length,
       state.currentModel,
+      state.activeSmallModel,
+      state.activeBigModel,
       state.status.downloading,
       state.status.downloadAll,
       state.status.modelToDownload,
@@ -257,12 +287,15 @@ async function fetchStatus() {
       });
     }
   } catch (error) {
+    if (generation !== statusGeneration || !isModelRouteActive()) return;
     state.error = error?.message || String(error);
     logDebug("Status fetch failed", state.error);
   } finally {
-    statusInFlight = false;
-    state.loading = false;
-    state.refreshing = false;
+    if (statusInFlight === generation) statusInFlight = null;
+    if (generation === statusGeneration && isModelRouteActive()) {
+      state.loading = false;
+      state.refreshing = false;
+    }
   }
 }
 
@@ -282,8 +315,9 @@ async function refreshAll(showToast = false) {
 function ensurePolling() {
   if (pollingHandle) return;
 
+  const generation = viewGeneration;
   const poll = async () => {
-    if (!isModelRouteActive()) {
+    if (generation !== viewGeneration || !isModelRouteActive()) {
       pollingHandle = null;
       return;
     }
@@ -293,21 +327,23 @@ function ensurePolling() {
       await fetchStatus();
       nextDelay = state.status.downloading ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
     } finally {
-      pollingHandle = setTimeout(poll, nextDelay);
+      if (generation === viewGeneration) pollingHandle = setTimeout(poll, nextDelay);
     }
   };
 
   pollingHandle = setTimeout(poll, ACTIVE_POLL_INTERVAL_MS);
 }
 
-async function setActiveModel(modelKey) {
-  const payload = await fetchJson("/api/params", {
+async function setActiveModel(modelKey, profile = "") {
+  const model = state.models.find(entry => safeText(entry?.value, "") === safeText(modelKey, ""));
+  const resolvedProfile = profile || (model?.requiresGpu ? "big" : "small");
+  selectionWrite = fetchJson("/api/models/active", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: "Model", value: modelKey }),
+    body: JSON.stringify({ profile: resolvedProfile, model: modelKey }),
   });
 
-  notify(payload.message || `Selected "${modelKey}".`);
+  try { return await selectionWrite; } finally { selectionWrite = null; }
 }
 
 async function startDownload(modelKey) {
@@ -375,6 +411,9 @@ async function refreshManifest() {
 }
 
 async function runAction(action, modelKey = "") {
+  const selecting = ["select", "select-small", "select-big"].includes(action);
+  if (!isModelRouteActive() || (selecting && state.selectionUncertain)) return;
+  const generation = viewGeneration;
   if (state.actionBusy) {
     notify("Please wait for the current action to finish.", "error");
     return;
@@ -394,9 +433,14 @@ async function runAction(action, modelKey = "") {
       return;
     }
 
-    if (action === "select") {
-      if (!modelKey) return;
-      await setActiveModel(modelKey);
+    if (action === "select" || action === "select-small" || action === "select-big") {
+      if (!modelKey && action !== "select-big") return;
+      const profile = action === "select-small" ? "small" : action === "select-big" ? "big" : "";
+      state.selectionUncertain = true;
+      ++statusGeneration;
+      const payload = await setActiveModel(modelKey, profile);
+      if (generation !== viewGeneration || !isModelRouteActive()) return;
+      notify(payload.message || `Selected "${modelKey}".`);
     } else if (action === "download") {
       if (!modelKey) return;
       await startDownload(modelKey);
@@ -417,18 +461,20 @@ async function runAction(action, modelKey = "") {
       await setUserFavorite(modelKey, false);
     }
 
+    if (generation !== viewGeneration || !isModelRouteActive()) return;
     await fetchStatus();
   } catch (error) {
+    if (generation !== viewGeneration || !isModelRouteActive()) return;
     notify(error?.message || String(error), "error");
+    await fetchStatus();
   } finally {
-    state.actionBusy = false;
+    if (generation === viewGeneration && isModelRouteActive()) state.actionBusy = false;
   }
 }
 
 function bindDomHandlers() {
   if (window.__modelManagerHandlersBound) return;
   window.__modelManagerHandlersBound = true;
-
   document.addEventListener("click", event => {
     if (!isModelRouteActive()) return;
 
@@ -454,10 +500,12 @@ function bindDomHandlers() {
     }
 
     if (!(target instanceof HTMLSelectElement)) return;
-    if (target.id === "mm-active-model-select") {
+    if (target.id === "mm-active-small-model-select" || target.id === "mm-active-big-model-select") {
       const modelKey = safeText(target.value, "");
-      if (!modelKey) return;
-      runAction("select", modelKey).catch(() => {});
+      const profile = target.id === "mm-active-big-model-select" ? "big" : "small";
+      if (!modelKey && profile !== "big") return;
+      target.value = profile === "big" ? state.activeBigModel : state.activeSmallModel;
+      runAction(`select-${profile}`, modelKey).catch(() => {});
       return;
     }
 
@@ -498,9 +546,11 @@ function bindDomHandlers() {
 function renderActions(model) {
   const modelKey = safeText(model.value, "");
   const modelIsDownloading = state.status.downloading && !state.status.downloadAll && state.status.modelToDownload === modelKey;
+  const profile = model.requiresGpu ? "big" : "small";
+  const isActive = profile === "big" ? state.activeBigModel === modelKey : state.activeSmallModel === modelKey;
 
-  if (state.currentModel === modelKey) {
-    return html`<span class="mm-chip mm-chip-active">Active</span>`;
+  if (isActive) {
+    return html`<span class="mm-chip mm-chip-active">Active ${profile === "big" ? "Big" : "Small"}</span>`;
   }
 
   if (state.status.downloading) {
@@ -512,7 +562,7 @@ function renderActions(model) {
 
   if (model.installed) {
     return html`
-      <button class="mm-btn mm-btn-secondary" data-mm-action="select" data-model="${modelKey}">Set Active</button>
+      <button class="mm-btn mm-btn-secondary" disabled="${() => state.actionBusy || state.selectionUncertain}" data-mm-action="select-${profile}" data-model="${modelKey}">Set Active ${profile === "big" ? "Big" : "Small"}</button>
       ${model.builtin
         ? ""
         : html`<button class="mm-btn mm-btn-danger" data-mm-action="delete" data-model="${modelKey}">Delete</button>`}
@@ -579,19 +629,38 @@ function renderSeriesSection(seriesName, models) {
   `;
 }
 
+function ensureModelView() {
+  if (document.querySelector(".mm-wrapper")) return;
+  const generation = ++viewGeneration;
+  ++statusGeneration;
+  clearTimeout(pollingHandle);
+  pollingHandle = null;
+  queueMicrotask(() => {
+    if (generation !== viewGeneration) return;
+    const observer = new MutationObserver(() => {
+      if (generation !== viewGeneration) { observer.disconnect(); return; }
+      if (document.querySelector(".mm-wrapper") && isModelRouteActive()) return;
+      observer.disconnect();
+      if (generation !== viewGeneration) return;
+      ++viewGeneration;
+      ++statusGeneration;
+      clearTimeout(pollingHandle);
+      pollingHandle = null;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    state.actionBusy = false;
+    state.selectionUncertain = true;
+    refreshAll();
+    ensurePolling();
+  });
+}
+
 export function ModelManager() {
   if (!initialized) {
     initialized = true;
     bindDomHandlers();
-    logDebug("Initializing component");
-    refreshAll().catch(error => {
-      state.error = error?.message || String(error);
-      state.loading = false;
-      state.refreshing = false;
-      logDebug("Initial refresh failed", state.error);
-    });
   }
-  ensurePolling();
+  ensureModelView();
 
   return html`
     <div class="mm-wrapper">
@@ -620,34 +689,59 @@ export function ModelManager() {
       </div>
 
       <div class="mm-status">
-        <span class="mm-chip">Current: ${getCurrentModelName()}</span>
-        <span class="mm-chip">Progress: ${safeText(state.status.progress, "Idle")}</span>
+        <span class="mm-chip">Loaded: ${() => getCurrentModelName()}</span>
+        <span class="mm-chip mm-chip-device-gpu">Active Small: ${() => getModelName(state.activeSmallModel)}</span>
+        <span class="mm-chip mm-chip-egpu">Active Big: ${() => getModelName(state.activeBigModel)}</span>
+        <span class="mm-chip">Progress: ${() => safeText(state.status.progress, "Idle")}</span>
         <span class="mm-chip">${() => getUserFavoriteModels(false).length} personal favorites</span>
         ${() => state.status.isOnroad ? html`<span class="mm-chip mm-chip-warning">Onroad: actions disabled</span>` : ""}
       </div>
 
       <div class="mm-filters">
-        <label class="mm-filter-label" for="mm-active-model-select">Active Model</label>
-        <select class="mm-select" id="mm-active-model-select">
-          ${(() => {
-            const orderedInstalled = getInstalledModels().sort((a, b) => {
-              const aCurrent = safeText(a.value) === state.currentModel ? 0 : 1;
-              const bCurrent = safeText(b.value) === state.currentModel ? 0 : 1;
+        <label class="mm-filter-label" for="mm-active-small-model-select">Active Small</label>
+        <select class="mm-select" id="mm-active-small-model-select" disabled="${() => state.actionBusy || state.selectionUncertain}">
+          ${() => {
+            const orderedInstalled = getInstalledModels("small").sort((a, b) => {
+              const aCurrent = safeText(a.value) === state.activeSmallModel ? 0 : 1;
+              const bCurrent = safeText(b.value) === state.activeSmallModel ? 0 : 1;
               if (aCurrent !== bCurrent) return aCurrent - bCurrent;
               return safeText(a.label, a.value).localeCompare(safeText(b.label, b.value), undefined, { sensitivity: "base" });
             });
 
             return orderedInstalled.length > 0
               ? orderedInstalled.map(model => html`
-                <option value="${safeText(model.value)}" selected="${() => safeText(model.value) === state.currentModel || false}">
+                <option value="${safeText(model.value)}" selected="${() => safeText(model.value) === state.activeSmallModel || false}">
                   ${safeText(model.label, model.value)}
                 </option>              `)
               : html`<option value="">No installed models</option>`;
-          })()}
+          }}
+        </select>
+
+        <label class="mm-filter-label" for="mm-active-big-model-select">Active Big</label>
+        <select class="mm-select" id="mm-active-big-model-select" disabled="${() => state.actionBusy || state.selectionUncertain}">
+          ${() => {
+            const orderedInstalled = getInstalledModels("big").sort((a, b) => {
+              const aCurrent = safeText(a.value) === state.activeBigModel ? 0 : 1;
+              const bCurrent = safeText(b.value) === state.activeBigModel ? 0 : 1;
+              if (aCurrent !== bCurrent) return aCurrent - bCurrent;
+              return safeText(a.label, a.value).localeCompare(safeText(b.label, b.value), undefined, { sensitivity: "base" });
+            });
+
+            return orderedInstalled.length > 0
+              ? html`
+                <option value="" selected="${() => !state.activeBigModel || false}">None — always use Active Small</option>
+                ${orderedInstalled.map(model => html`
+                  <option value="${safeText(model.value)}" selected="${() => safeText(model.value) === state.activeBigModel || false}">
+                    ${safeText(model.label, model.value)}
+                  </option>
+                `)}
+              `
+              : html`<option value="" selected>None — always use Active Small</option>`;
+          }}
         </select>
 
         <label class="mm-filter-label" for="mm-favorite-model-select">Favorite Models</label>
-        <select class="mm-select" id="mm-favorite-model-select" disabled="${() => getUserFavoriteModels(true).length === 0}">
+        <select class="mm-select" id="mm-favorite-model-select" disabled="${() => state.actionBusy || state.selectionUncertain || getUserFavoriteModels(true).length === 0}">
           ${(() => {
             const favorites = getUserFavoriteModels(true);
             return favorites.length > 0
@@ -701,7 +795,7 @@ export function ModelManager() {
 
       ${() => !state.loading ? html`
         <div class="mm-list">
-          ${(() => {
+          ${() => {
             if (state.sortMode === "release_date") {
               const models = getReleaseOrderedModels();
               return models.length === 0
@@ -713,7 +807,7 @@ export function ModelManager() {
             return seriesNames.length === 0
               ? html`<div class="mm-empty">No models available.</div>`
               : seriesNames.map(seriesName => renderSeriesSection(seriesName, grouped[seriesName]));
-          })()}
+          }}
         </div>
       ` : ""}
     </div>

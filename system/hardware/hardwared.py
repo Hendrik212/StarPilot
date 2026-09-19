@@ -29,15 +29,17 @@ from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.fan_controller import TiciFanController
 from openpilot.system.hardware.usb import (
   CHESTNUT_FW_VERSION,
-  CHESTNUT_ROM_USB_IDS,
-  CHESTNUT_USB_IDS,
+  CHESTNUT_USB_PRODUCT,
   get_usb_state,
   get_usb_topology,
+  is_chestnut_usb_id,
   set_usb_state,
 )
+from openpilot.system.hardware.chestnut.status import ChestnutStatus
 from openpilot.system.version import terms_version, training_version
 from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
 
+from openpilot.starpilot.assets.model_manager import selected_chestnut_artifacts_ready
 from openpilot.starpilot.common.starpilot_variables import get_starpilot_toggles
 
 ThermalStatus = log.DeviceState.ThermalStatus
@@ -118,11 +120,15 @@ class Chestnut:
     self.attempts = 0
     self.last_attempt = 0.0
     self.flashed = False
+    self.mismatch = False
+
+  @property
+  def failed(self) -> bool:
+    return self.mismatch and self.attempts >= self.MAX_ATTEMPTS and self.thread is not None and not self.thread.is_alive() and not self.flashed
 
   def _firmware_mismatch(self, usb_state: list[dict]) -> bool:
-    expected = f"custom {CHESTNUT_FW_VERSION}-CLEAN"
-    ids = CHESTNUT_USB_IDS + CHESTNUT_ROM_USB_IDS
-    return any((device["vendorId"], device["productId"]) in ids and device["product"] != expected for device in usb_state)
+    return any(is_chestnut_usb_id(device["vendorId"], device["productId"], include_bootloader=True) and
+               device["product"] != CHESTNUT_USB_PRODUCT for device in usb_state)
 
   def _flash(self) -> None:
     script = os.path.join(os.path.dirname(__file__), "chestnut", "flash.py")
@@ -137,7 +143,8 @@ class Chestnut:
     self.flashed = result.returncode == 0
 
   def update(self, offroad: bool, usb_state: list[dict]) -> None:
-    if not self._firmware_mismatch(usb_state):
+    self.mismatch = self._firmware_mismatch(usb_state)
+    if not self.mismatch:
       self.flashed = False
       return
     if not offroad or self.flashed or self.attempts >= self.MAX_ATTEMPTS:
@@ -295,7 +302,7 @@ def hw_state_thread(end_event, hw_queue):
 
 def hardware_thread(end_event, hw_queue) -> None:
   pm = messaging.PubMaster(['deviceState'])
-  sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates"], poll="pandaStates")
+  sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates", "chestnutState"], poll="pandaStates")
 
   count = 0
 
@@ -337,6 +344,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   params = Params()
   power_monitor = PowerMonitoring()
   chestnut = Chestnut() if AGNOS else None
+  chestnut_status = ChestnutStatus() if AGNOS else None
 
   uptime_offroad: float = params.get("UptimeOffroad", return_default=True)
   uptime_onroad: float = params.get("UptimeOnroad", return_default=True)
@@ -420,6 +428,27 @@ def hardware_thread(end_event, hw_queue) -> None:
     set_usb_state(msg.deviceState, last_hw_state.usb_state)
     if chestnut is not None:
       chestnut.update(started_ts is None, last_hw_state.usb_state)
+      model_lab_config = params.get("ModelLabConfig")
+      active_big_model = params.get("ActiveBigModel", encoding="utf-8") or ""
+      chestnut_expected = active_big_model.lower() not in ("", "none") or (
+        isinstance(model_lab_config, dict) and bool(model_lab_config.get("enabled"))
+      )
+      chestnut_state = sm["chestnutState"]
+      chestnut_valid = sm.alive["chestnutState"] and sm.valid["chestnutState"]
+      compiled = params.get_bool("UsbGpuCompiled")
+      if started_ts is None:
+        compiled = selected_chestnut_artifacts_ready(params)
+      chestnut_status.update(
+        started_ts is None,
+        chestnut_expected,
+        last_hw_state.usb_state,
+        chestnut.failed,
+        params.get_bool("UsbGpuLoading"),
+        params.get("UsbGpuActive"),
+        compiled,
+        chestnut_state if chestnut_valid else None,
+        set_offroad_alert_if_changed,
+      )
 
     # this subset is only used for offroad
     temp_sources = [
@@ -435,7 +464,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     msg.deviceState.maxTempC = all_comp_temp
 
     if fan_controller is not None:
-      msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"])
+      msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], starpilot_toggles.aggressive_cooling)
 
     # StarPilot variables
     if starpilot_toggles.increase_thermal_limits:

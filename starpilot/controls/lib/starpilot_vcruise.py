@@ -5,8 +5,15 @@ import math
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 
-from openpilot.starpilot.common.starpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED
-from openpilot.starpilot.controls.lib.curve_speed_controller import CurveSpeedController, is_manual_speed_control
+from openpilot.starpilot.common.starpilot_variables import CRUISING_SPEED
+from openpilot.starpilot.controls.lib.curve_speed_controller import (
+  CSC_ACTIVE_OFF_DELTA,
+  CSC_GLOW_HOLD_TIME,
+  CSC_GLOW_ON_DELTA,
+  CSC_MIN_SPEED,
+  CurveSpeedController,
+  is_manual_speed_control,
+)
 from openpilot.starpilot.controls.lib.speed_limit_controller import SpeedLimitController
 from openpilot.selfdrive.controls.lib.longitudinal_vehicle_tunes import (
   get_force_stop_distance_bias,
@@ -15,8 +22,6 @@ from openpilot.selfdrive.controls.lib.longitudinal_vehicle_tunes import (
   get_force_stop_reanchor_speed_tolerance,
 )
 
-CSC_MIN_SPEED = CITY_SPEED_LIMIT * CV.MPH_TO_MS
-CSC_CURVE_RELEASE_HOLD_TIME = 0.75
 OVERRIDE_FORCE_STOP_TIMER = 10
 STANDSTILL_FORCE_STOP_CLEAR_TIME = 0.75
 # Open-loop — green is undetectable at standstill, so this only needs to cover the
@@ -30,7 +35,10 @@ SLC_LEAD_DROP_RELAXATION_MAX_POST_DROP_CLOSING_SPEED = 0.35
 SLC_LEAD_DROP_RELAXATION_MAX_LEAD_BRAKE = 0.25
 SLC_LEAD_DROP_RELAXATION_OVERSPEED_BP = [0.0, 5.0 * CV.MPH_TO_MS, 10.0 * CV.MPH_TO_MS, 15.0 * CV.MPH_TO_MS]
 SLC_LEAD_DROP_RELAXATION_DECEL_V = [0.7, 0.9, 1.15, 1.35]
-NAV_TURN_COMFORT_DECEL = 1.25
+# This is an approach envelope, not a request for harder braking. A gentler
+# deceleration value lowers the target farther from the turn and gives the MPC
+# more time to settle before the intersection.
+NAV_TURN_COMFORT_DECEL = 0.45
 NAV_TURN_DISTANCE_BUFFER = 8.0
 NAV_TURN_MIN_TARGET_DELTA = 0.25
 NAV_TURN_TARGET_SPEEDS = {
@@ -202,8 +210,9 @@ class StarPilotVCruise:
     self._nav_instruction_state = {}
     self._applied_slc_control_target = 0.0
     self.csc_controlling_speed = False
+    self.csc_glow_release_timer = 0.0
+    self.csc_override = False
     self.csc_target = 0.0
-    self.csc_curve_last_seen_at = None
 
   def _update_nav_instruction_state(self):
     raw = self.starpilot_planner.params_memory.get("NavInstructionState") or {}
@@ -571,28 +580,62 @@ class StarPilotVCruise:
       starpilot_toggles.curve_speed_controller and
       (not getattr(starpilot_toggles, "csc_no_lead", False) or not following_lead)
     )
-    csc_curve_detected = csc_available and self.starpilot_planner.road_curvature_detected
-    if csc_curve_detected:
-      self.csc.update_target(v_ego)
 
-      self.csc_controlling_speed = True
-      self.csc_target = self.csc.target
-      self.csc_curve_last_seen_at = now
-    else:
-      csc_release_hold = bool(
-        csc_available and
-        self.csc_controlling_speed and
-        self.csc_curve_last_seen_at is not None and
-        self._elapsed_seconds(now, self.csc_curve_last_seen_at) < CSC_CURVE_RELEASE_HOLD_TIME
-      )
-      if not csc_release_hold:
-        self.csc.log_data(v_ego, sm)
 
+    csc_blinker_on = ((sm["carState"].leftBlinker or sm["carState"].rightBlinker) and
+                      not self.starpilot_planner.driving_in_curve)
+    csc_was_controlling = self.csc_controlling_speed
+
+    slc_confirmation_pending = self.slc.speed_limit_changed_timer > DT_MDL and self.slc.unconfirmed_speed_limit >= 1
+    csc_accel_button = bool(sm["starpilotCarState"].accelPressed) and not slc_confirmation_pending
+
+
+
+    if csc_was_controlling and csc_accel_button:
+      self.csc_override = True
+    if not (long_control_active and starpilot_toggles.curve_speed_controller):
+      self.csc_override = False
+
+    if csc_available and not csc_blinker_on:
+      self.csc.update_target(v_ego, v_cruise)
+
+      if self.csc_override and self.csc.target > v_cruise - CSC_ACTIVE_OFF_DELTA:
+        self.csc_override = False
+
+      if self.csc_override:
         self.csc_controlling_speed = False
-        self.csc.target_set = False
-        self.csc_curve_last_seen_at = None
-
+        self.csc_glow_release_timer = 0.0
         self.csc_target = v_cruise
+      else:
+        self.csc_target = self.csc.target
+
+
+
+        if self.csc_target < v_cruise - CSC_GLOW_ON_DELTA and v_ego >= self.csc_target - CSC_ACTIVE_OFF_DELTA:
+          self.csc_controlling_speed = True
+          self.csc_glow_release_timer = 0.0
+        elif self.csc_target > v_cruise - CSC_ACTIVE_OFF_DELTA:
+
+          self.csc_glow_release_timer += DT_MDL
+          if self.csc_glow_release_timer >= CSC_GLOW_HOLD_TIME:
+            self.csc_controlling_speed = False
+        else:
+          self.csc_glow_release_timer = 0.0
+    elif csc_available:
+
+
+      self.csc.update_target(v_ego, v_cruise)
+      self.csc_controlling_speed = False
+      self.csc_glow_release_timer = 0.0
+      self.csc_target = v_cruise
+    else:
+      self.csc.reset(v_cruise)
+      self.csc_controlling_speed = False
+      self.csc_glow_release_timer = 0.0
+      self.csc_target = v_cruise
+
+    self.csc.handle_override(v_ego, csc_was_controlling, sm, accel_button=csc_accel_button)
+    self.csc.log_data(v_ego, sm)
 
     # Pfeiferj's Speed Limit Controller
     self.slc.starpilot_toggles = starpilot_toggles
@@ -712,8 +755,7 @@ class StarPilotVCruise:
         self.slc_offset,
         self.slc.overridden_speed,
         v_ego_diff,
-        allow_lower_override=(getattr(starpilot_toggles, "redneck_cruise", False) and
-                              getattr(starpilot_toggles, "speed_limit_controller_override_set_speed", False)),
+        allow_lower_override=getattr(starpilot_toggles, "redneck_cruise", False),
       )
       slc_control_target = get_slc_lead_drop_relaxed_target(
         slc_control_target,
@@ -725,7 +767,7 @@ class StarPilotVCruise:
         getattr(self.slc, "source", "None"),
       )
       self._applied_slc_control_target = slc_control_target if slc_control_target > 0.0 else 0.0
-      if slc_control_target >= CSC_MIN_SPEED:
+      if slc_control_target > 0.0:
         targets.append(slc_control_target)
       if self.nav_turn_target > 0.0:
         targets.append(self.nav_turn_target)

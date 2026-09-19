@@ -72,8 +72,7 @@ class VCruiseHelper:
     return short_interval, long_interval
 
   def _uses_software_cruise(self) -> bool:
-    return bool(self.gm_cc_only or self.redneck_non_pcm or
-                not self.CP.pcmCruise or getattr(self.CP, "openpilotLongitudinalControl", False))
+    return bool(self.gm_cc_only or self.redneck_non_pcm or not self.CP.pcmCruise)
 
   @property
   def v_cruise_initialized(self):
@@ -215,7 +214,7 @@ class VCruiseHelper:
 
     engage_floor_kph = max(V_CRUISE_MIN, 7.0 * CV.MPH_TO_KPH)
     resume_pressed = any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents)
-    remembered_resume = resume_prev_button and (self.gm_cc_only or self.redneck_non_pcm)
+    remembered_resume = resume_prev_button and self._uses_software_cruise()
 
     if self.v_cruise_initialized and (resume_pressed or remembered_resume):
       self.v_cruise_kph = self.v_cruise_kph_last
