@@ -441,12 +441,6 @@ def suppress_redundant_gv70_brake_cancel(CP, brake_pressed: bool, lat_active: bo
   )
 
 
-def clear_ioniq_6_torque_when_request_inactive(CP, apply_torque: int, apply_steer_req: bool) -> int:
-  if CP.carFingerprint == CAR.HYUNDAI_IONIQ_6 and not apply_steer_req:
-    return 0
-  return apply_torque
-
-
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP):
     super().__init__(dbc_names, CP)
@@ -642,8 +636,6 @@ class CarController(CarControllerBase):
       if not CC.latActive:
         apply_torque = 0
 
-      apply_torque = clear_ioniq_6_torque_when_request_inactive(self.CP, apply_torque, apply_steer_req)
-
       # Hold torque with induced temporary fault when cutting the actuation bit
       # FIXME: we don't use this with CAN FD?
       torque_fault = CC.latActive and not apply_steer_req
@@ -819,7 +811,7 @@ class CarController(CarControllerBase):
     if not self.long_active_ecu:
       if self.cancel_counter > CANCEL_BUTTON_DELAY_FRAMES:
         can_sends.append(hyundaican.create_clu11(self.packer, self.frame, CS.clu11, Buttons.CANCEL, self.CP))
-      elif self._ray_pedal and CC.longActive and CS.out.cruiseState.enabled:
+      elif self._ray_pedal and CC.enabled and CS.out.cruiseState.enabled:
         if (self.frame - self.last_button_frame) * DT_CTRL > 0.1:
           can_sends.append(hyundaican.create_clu11(self.packer, self.frame, CS.clu11, Buttons.CANCEL, self.CP))
           self.last_button_frame = self.frame

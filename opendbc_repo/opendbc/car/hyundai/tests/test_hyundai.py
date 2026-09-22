@@ -20,8 +20,7 @@ from opendbc.car.hyundai.carcontroller import CarController, CANCEL_BUTTON_DELAY
                                              should_track_stop_accel_directly_for_car, \
                                              preserve_stock_canfd_lfa_status, \
                                              preserve_stock_canfd_lkas_status, \
-                                             suppress_redundant_gv70_brake_cancel, \
-                                             clear_ioniq_6_torque_when_request_inactive
+                                             suppress_redundant_gv70_brake_cancel
 from opendbc.car.hyundai.carstate import CarState, decode_canfd_camera_lead, decode_ioniq_6_blindspot_radar_state, \
                                              get_canfd_cruise_available
 from opendbc.car.hyundai.interface import CarInterface, KIA_EV9_ACCEL_MAX, get_communication_control_request
@@ -680,14 +679,7 @@ class TestHyundaiFingerprint:
     assert not (CP.flags & HyundaiFlags.CANFD_LKA_STEERING)
     assert bool(CP.flags & HyundaiFlags.CANFD_CAMERA_SCC)
 
-  def test_ioniq_6_clears_torque_with_inactive_safety_request(self):
-    ioniq_6_cp = SimpleNamespace(carFingerprint=CAR.HYUNDAI_IONIQ_6)
-    other_cp = SimpleNamespace(carFingerprint=CAR.KIA_EV6)
-
-    assert clear_ioniq_6_torque_when_request_inactive(ioniq_6_cp, -409, False) == 0
-    assert clear_ioniq_6_torque_when_request_inactive(ioniq_6_cp, -409, True) == -409
-    assert clear_ioniq_6_torque_when_request_inactive(other_cp, -409, False) == -409
-
+  def test_palisade_2023_uses_can_canfd_blended_layout(self):
     palisade_2023 = CarInterface.get_params(CAR.HYUNDAI_PALISADE_2023, gen_empty_fingerprint(), [], True, False, False, None)
     assert palisade_2023.flags & HyundaiFlags.CAN_CANFD_BLENDED
     assert DBC[palisade_2023.carFingerprint][Bus.pt] == "hyundai_palisade_2023_generated"
@@ -1674,6 +1666,20 @@ class TestHyundaiFingerprint:
     exact, matches = match_fw_to_car(car_fw, "", allow_exact=True, allow_fuzzy=False, log=False)
     assert exact
     assert matches == {candidate}
+
+  def test_staria_2023_australian_route_fw_exact_matches(self):
+    route_fw = {
+      (Ecu.fwdCamera, 0x7c4): b'\xf1\x00US4 MFC  AT AUS RHD 1.00 1.04 99211-CG000 210819',
+      (Ecu.fwdRadar, 0x7d0): b'\xf1\x00US4_ RDR -----      1.00 1.00 99110-CG000         ',
+    }
+    car_fw = [
+      CarParams.CarFw(ecu=ecu, fwVersion=version, address=address, subAddress=0, brand="hyundai")
+      for (ecu, address), version in route_fw.items()
+    ]
+
+    exact, matches = match_fw_to_car(car_fw, "KMFYFX71MPU095311", allow_fuzzy=False, log=False)
+    assert exact
+    assert matches == {CAR.HYUNDAI_STARIA_4TH_GEN}
 
   def test_kona_ev_non_scc_has_no_dedicated_fw_coverage(self):
     assert CAR.HYUNDAI_KONA_EV_NON_SCC not in FW_VERSIONS
