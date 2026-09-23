@@ -49,7 +49,11 @@ class CarController(CarControllerBase):
 
     # **** Steering Controls ************************************************ #
 
-    if self.frame % self.CCP.STEER_STEP == 0:
+    if self.frame % self.CCP.STEER_STEP == 0 and not CS.out.accFaulted:
+      # While the car reports an ACC fault (TSK_Status 6/7), the stock camera drops lane assist
+      # and the EPS faults on our unexpected HCA_01 keep-alives (ready->fault duty cycle). Sending
+      # nothing here silences the EPS and the spurious LKAS-fault alerts; steering is impossible
+      # anyway because the panda's safety gate closes when the ACC state is faulted.
       apply_torque = 0
       if self.CP.flags & VolkswagenFlags.MEB:
         if CC.latActive:
@@ -111,10 +115,13 @@ class CarController(CarControllerBase):
         self.apply_torque_last = apply_torque
         can_sends.append(self.CCS.create_steering_control(self.packer_pt, self.CAN.pt, apply_torque, hca_enabled))
 
-      if self.CP.flags & VolkswagenFlags.STOCK_HCA_PRESENT:
+      if self.CP.flags & VolkswagenFlags.STOCK_HCA_PRESENT and not CS.out.accFaulted:
         # Pacify VW Emergency Assist driver inactivity detection by changing its view of driver steering input torque
         # to the greatest of actual driver input or 2x openpilot's output (1x openpilot output is not enough to
         # consistently reset inactivity detection on straight level roads). See commaai/openpilot#23274 for background.
+        # Skipped while the car reports an ACC fault (TSK_Status 6/7): the car has disabled lane
+        # assist at that point, so our LH_EPS_03 spoof is unexpected traffic and provokes the EPS
+        # into a repeating ready->fault duty cycle (observed: 2.1s fault every 7.2s on the Crafter).
         ea_simulated_torque = float(np.clip(apply_torque * 2, -self.CCP.STEER_MAX, self.CCP.STEER_MAX))
         if abs(CS.out.steeringTorque) > abs(ea_simulated_torque):
           ea_simulated_torque = CS.out.steeringTorque
