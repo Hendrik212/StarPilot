@@ -27,7 +27,11 @@ def backup_starpilot(build_metadata, params):
 
   _, _, free = shutil.disk_usage(STARPILOT_BACKUPS)
   minimum_backup_size = params.get_int("MinimumBackupSize", return_default=True, default=0)
-  if free > minimum_backup_size * maximum_backups:
+  # Reserve room for the new backup itself, not just the retention limit: the
+  # learned MinimumBackupSize is the last SUCCESSFUL size, but the tar streams
+  # the whole repo and can exceed it (e.g. after a big pull). Leaving less
+  # headroom than one backup needs is how the disk filled up mid-write.
+  if free > minimum_backup_size * maximum_backups + minimum_backup_size:
     destination = STARPILOT_BACKUPS / f"{build_metadata.openpilot.git_commit}_{build_metadata.channel}_auto"
     create_backup(Path(BASEDIR), destination, "Successfully backed up StarPilot!", "Failed to backup StarPilot...", params, minimum_backup_size, compressed=True)
 
@@ -83,16 +87,28 @@ def create_backup(backup, destination, success_message, fail_message, params, mi
   if compressed:
     compressed_temp = destination.parent / f"{destination.name}_in_progress.tar.zst"
 
-    with open(compressed_temp, "wb") as f_out:
-      cctx = zstd.ZstdCompressor()
-      with cctx.stream_writer(f_out) as compressor:
-        with tarfile.open(fileobj=compressor, mode="w") as tar:
-          try:
-            tar.add(backup, arcname=destination.name)
-          except OSError:
-            pass
+    try:
+      with open(compressed_temp, "wb") as f_out:
+        cctx = zstd.ZstdCompressor()
+        with cctx.stream_writer(f_out) as compressor:
+          with tarfile.open(fileobj=compressor, mode="w") as tar:
+            # .git dominates the repo (~7.5G on the device) and is worthless in a
+            # snapshot: it can always be re-fetched from origin. Skipping it keeps
+            # the backup ~1G instead of ~8.5G, which is what filled the /data
+            # partition and left the device unable to boot openpilot.
+            def _skip_git(info):
+              if ".git" in Path(info.name).parts:
+                return None
+              return info
 
-    compressed_temp.rename(final_destination)
+            tar.add(backup, arcname=destination.name, filter=_skip_git)
+      compressed_temp.rename(final_destination)
+    except OSError:
+      # Don't leave a giant _in_progress tarball behind on ENOSPC/disk errors --
+      # it consumes all remaining space and bricks the next boot.
+      delete_file(compressed_temp, report=False)
+      print(fail_message)
+      return
 
     compressed_backup_size = final_destination.stat().st_size
     if minimum_backup_size == 0 or compressed_backup_size < minimum_backup_size:
