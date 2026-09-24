@@ -160,10 +160,9 @@ class CarControllerParams:
 
       else:
         self.STEER_DRIVER_ALLOWANCE = 80    # Driver intervention threshold 0.8 Nm
-        if CP.carFingerprint == CAR.VOLKSWAGEN_CRAFTER_MK2:
-          self.STEER_DELTA_UP = 10          # VW: faster rate ramp for heavy van (STEER_MAX / (50Hz * 0.60)); coupled with safety mode max_rate_up
-        else:
-          self.STEER_DELTA_UP = 4           # Max HCA reached in 1.50s (STEER_MAX / (50Hz * 1.50))
+        # CRAFTER_MK2 must stay at 4 too: StarPilot flashes upstream's prebuilt panda firmware
+        # (max_rate_up = 4), so any faster ramp gets its HCA_01 frames blocked and the EPS faults.
+        self.STEER_DELTA_UP = 4             # Max HCA reached in 1.50s (STEER_MAX / (50Hz * 1.50))
         self.STEER_DELTA_DOWN = 10          # Min HCA reached in 0.60s (STEER_MAX / (50Hz * 0.60))
 
         if CP.transmissionType == TransmissionType.automatic:
