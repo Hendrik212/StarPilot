@@ -25,7 +25,7 @@ from opendbc.car.tesla.values import CAR as TESLA_CAR
 from opendbc.car.toyota.values import CAR as TOYOTA_CAR, ToyotaStarPilotFlags
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.constants import CV
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
 from openpilot.selfdrive.controls.lib.latcontrol_torque import KP
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.starpilot.common.model_versions import is_tinygrad_model_version
@@ -796,6 +796,12 @@ class StarPilotVariables:
     toggle.honda_lateral_pid_kp_scale = self.get_value("HondaLateralPidKpScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
     toggle.honda_lateral_pid_ki_scale = self.get_value("HondaLateralPidKiScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
     toggle.lane_center_offset = self.get_value("LaneCenterOffset", cast=float, condition=toggle.lane_centering, default=0.0, min=-0.3, max=0.3)
+    try:
+      toggle.lane_centering_scale = self.get_value("LaneCenteringScale", cast=float, condition=toggle.lane_centering, default=1.0, min=0.5, max=2.0)
+      toggle.lane_centering_gain = self.get_value("LaneCenteringGain", cast=float, condition=toggle.lane_centering, default=0.3, min=0.0, max=1.0)
+    except UnknownKeyName:
+      # The prebuilt params_pyx.so from an upstream build commit predates these keys: fall back to stock behavior
+      toggle.lane_centering_scale, toggle.lane_centering_gain = 1.0, 0.3
     toggle.lane_centering_e2e_authority = self.get_value(
       "LaneCenteringE2EAuthority", cast=float, condition=toggle.lane_centering,
       default=1.0, min=0.0, max=1.0,

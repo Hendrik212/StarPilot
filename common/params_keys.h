@@ -455,6 +455,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LaneCenteringPauseOnSignal", {PERSISTENT, BOOL, "1", "1", 2}},
     {"LaneCenteringE2EAuthority", {PERSISTENT, FLOAT, "1.0", "1.0", 3}},
     {"LaneCenterOffset", {PERSISTENT, FLOAT, "0.0", "0.0", 3}},
+    {"LaneCenteringScale", {PERSISTENT, FLOAT, "1.0", "1.0", 3}},
+    {"LaneCenteringGain", {PERSISTENT, FLOAT, "0.3", "0.3", 3}},
     {"LaneChanges", {PERSISTENT, BOOL, "1", "1", 0, SETTINGS_SIMPLE}},
     {"LaneChangeCloseGap", {PERSISTENT, BOOL, "0", "0", 1, SETTINGS_SIMPLE}},
     {"LaneChangeCloseGapSeconds", {PERSISTENT, FLOAT, "0.6", "0.6", 1, SETTINGS_SIMPLE}},

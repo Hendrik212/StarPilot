@@ -15,7 +15,7 @@ def _sections():
 
 def test_lane_centering_is_only_in_galaxy_developer_section():
   sections = _sections()
-  keys = {"LaneCentering", "LaneCenterOffset", "LaneCenteringPauseOnSignal", "LaneCenteringE2EAuthority"}
+  keys = {"LaneCentering", "LaneCenterOffset", "LaneCenteringPauseOnSignal", "LaneCenteringE2EAuthority", "LaneCenteringScale", "LaneCenteringGain"}
 
   assert keys <= sections["Developer"].keys()
   for name, params in sections.items():

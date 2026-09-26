@@ -5143,6 +5143,32 @@
         ]
       },
       {
+        "key": "LaneCenteringScale",
+        "label": "Lane Distance Scale",
+        "description": "Multiply the vision model's lateral distances to get real meters. The model assumes a car-height camera (about 1.22 m); on a higher mount lanes read too narrow. Use your camera height divided by 1.22 (e.g. 1.52 for a van at 1.85 m).",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.5,
+        "max": 2.0,
+        "step": 0.01,
+        "precision": 2,
+        "parent_key": "LaneCentering",
+        "settings_tier": "advanced"
+      },
+      {
+        "key": "LaneCenteringGain",
+        "label": "Lane Centering Strength",
+        "description": "How hard lane centering steers toward its target. 0.30 is the stock strength; raise it if the offset has no visible effect.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.05,
+        "precision": 2,
+        "parent_key": "LaneCentering",
+        "settings_tier": "advanced"
+      },
+      {
         "key": "HondaLateralPidKpScale",
         "label": "Honda PID Kp Scale",
         "description": "Scale the active Honda lateralTuning.pid.kpV values from openDBC. Applies live to Honda PID lateral only.",

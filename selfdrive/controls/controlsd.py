@@ -745,7 +745,9 @@ class Controls:
       bool(self.sm.all_checks(['modelV2'])),
       self.starpilot_toggles.lane_centering_pause_on_signal,
       bool(CS.leftBlinker or CS.rightBlinker),
-      bool(CS.steeringPressed))
+      bool(CS.steeringPressed),
+      scale=self.starpilot_toggles.lane_centering_scale,
+      gain=self.starpilot_toggles.lane_centering_gain)
 
     jerk_factor = 1.0
     if self.starpilot_toggles.lane_change_pace < 10:

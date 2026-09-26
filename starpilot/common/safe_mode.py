@@ -55,6 +55,8 @@ SAFE_MODE_MANAGED_KEYS = (
   "LaneCenteringPauseOnSignal",
   "LaneCenteringE2EAuthority",
   "LaneCenterOffset",
+  "LaneCenteringScale",
+  "LaneCenteringGain",
   "LaneChanges",
   "LaneChangeTime",
   "LaneDetectionWidth",

@@ -393,6 +393,7 @@ class ModelRenderer(Widget):
       bool(toggles.get("lane_centering_pause_on_signal", True)),
       bool(car_state.leftBlinker or car_state.rightBlinker),
       applied_correction,
+      scale=toggles.get("lane_centering_scale", 1.0),
     )
 
   def _draw_lane_lines(self):

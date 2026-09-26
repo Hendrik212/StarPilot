@@ -208,3 +208,39 @@ def test_visual_direction_uses_filtered_correction_in_deadband():
 def test_visual_direction_follows_applied_correction():
   model = _model(left=-1.5, right=2.1)
   assert get_lane_centering_visual_direction(model, _V_EGO, 0.0, 0.0, True, True, applied_correction=-0.001) == -1
+
+
+def _update_scaled(controller, model, *, scale, gain=0.3, offset=0.0):
+  return controller.update(0.0, model, _V_EGO, True, offset, 0.0, True, True, scale=scale, gain=gain)
+
+
+def test_scale_converts_high_mount_lane_widths_to_meters():
+  # A 1.85 m camera sees a 3.4 m lane as ~2.24 m: rejected unscaled, accepted at 1.52.
+  model = _model(left=-1.0, right=1.24, model_y=0.0)
+  unscaled = LaneCenteringController()
+  scaled = LaneCenteringController()
+  for _ in range(300):
+    out_unscaled = _update_scaled(unscaled, model, scale=1.0)
+    out_scaled = _update_scaled(scaled, model, scale=1.52)
+  assert out_unscaled == 0.0
+  assert out_scaled > 0.0
+
+
+def test_gain_scales_correction_and_zero_disables():
+  model = _model(left=-1.5, right=2.1)
+  outputs = {}
+  for gain in (0.0, 0.3, 0.6):
+    controller = LaneCenteringController()
+    for _ in range(300):
+      outputs[gain] = _update_scaled(controller, model, scale=1.0, gain=gain)
+  assert outputs[0.0] == 0.0
+  assert outputs[0.6] == pytest.approx(2.0 * outputs[0.3], rel=1e-3)
+
+
+def test_out_of_range_scale_and_gain_are_clipped():
+  model = _model(left=-1.5, right=2.1)
+  a, b = LaneCenteringController(), LaneCenteringController()
+  for _ in range(300):
+    high = _update_scaled(a, model, scale=1.0, gain=5.0)
+    capped = _update_scaled(b, model, scale=1.0, gain=1.0)
+  assert high == pytest.approx(capped)

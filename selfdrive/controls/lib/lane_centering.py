@@ -14,6 +14,9 @@ _MAX_OFFSET = 0.3
 _MIN_CENTER_TO_LINE = 1.1
 _MAX_RAW_CORRECTION = 0.004
 _MAX_GAIN = 0.30
+_MIN_SCALE = 0.5
+_MAX_SCALE = 2.0
+_MAX_USER_GAIN = 1.0
 _VISUAL_CORRECTION_EPSILON = 1e-6
 _SMOOTH_TAU = 0.4
 _SIGNAL_RELEASE_TAU = 0.20
@@ -33,18 +36,21 @@ class LaneCenteringController:
     self._correction = 0.0
 
   def update(self, model_curvature, model_v2, v_ego, enabled, offset, e2e_authority, lat_active, model_valid,
-             pause_on_signal=False, turn_signal_active=False, driver_override=False) -> float:
+             pause_on_signal=False, turn_signal_active=False, driver_override=False,
+             scale=1.0, gain=_MAX_GAIN) -> float:
     model_curvature = float(model_curvature)
 
     try:
       v_ego = float(v_ego)
       offset = float(offset)
       e2e_authority = float(e2e_authority)
+      scale = float(scale)
+      gain = float(gain)
     except (TypeError, ValueError):
       self.reset()
       return model_curvature
 
-    if not np.isfinite([v_ego, offset, e2e_authority]).all():
+    if not np.isfinite([v_ego, offset, e2e_authority, scale, gain]).all():
       self.reset()
       return model_curvature
 
@@ -73,12 +79,13 @@ class LaneCenteringController:
       v_ego,
       float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET)),
       float(np.clip(e2e_authority, 0.0, 1.0)),
+      scale,
     )
     if not valid:
       self._correction = float(smooth_value(0.0, self._correction, _CONFIDENCE_RELEASE_TAU, dt=DT_CTRL))
       return model_curvature + self._correction
 
-    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * _MAX_GAIN
+    target = float(np.clip(raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * float(np.clip(gain, 0.0, _MAX_USER_GAIN))
     self._correction = float(smooth_value(target, self._correction, _SMOOTH_TAU, dt=DT_CTRL))
     return model_curvature + self._correction
 
@@ -91,7 +98,12 @@ class LaneCenteringController:
     return bool(x[0] <= distance <= x[-1])
 
   @staticmethod
-  def _raw_correction(model_v2, v_ego: float, offset: float, e2e_authority: float) -> tuple[bool, float]:
+  def _raw_correction(model_v2, v_ego: float, offset: float, e2e_authority: float, scale: float = 1.0) -> tuple[bool, float]:
+    # scale converts the model's lateral distances to real metres. The model assumes a car-height
+    # camera (~1.22 m); a higher mount shrinks every ground distance by roughly
+    # assumed_height / real_height (VW Crafter at 1.85 m: lanes read ~0.65x). Only lateral
+    # positions are scaled: the lookahead is taken from vEgo, and the std gates stay in model units.
+    scale = float(np.clip(scale, _MIN_SCALE, _MAX_SCALE)) if np.isfinite(scale) else 1.0
     try:
       lane_lines = model_v2.laneLines
       probs = np.asarray(model_v2.laneLineProbs, dtype=float)
@@ -120,15 +132,15 @@ class LaneCenteringController:
       if not all(LaneCenteringController._covers(x, lookahead) for x in (left_x, right_x, pos_x)):
         return False, 0.0
 
-      left = float(np.interp(lookahead, left_x, left_y))
-      right = float(np.interp(lookahead, right_x, right_y))
+      left = float(np.interp(lookahead, left_x, left_y)) * scale
+      right = float(np.interp(lookahead, right_x, right_y)) * scale
       width = right - left
       if not _MIN_LANE_WIDTH <= width <= _MAX_LANE_WIDTH:
         return False, 0.0
 
       max_safe_offset = min(_MAX_OFFSET, max(0.0, width * 0.5 - _MIN_CENTER_TO_LINE))
       target_y = 0.5 * (left + right) + float(np.clip(offset, -max_safe_offset, max_safe_offset))
-      model_y = float(np.interp(lookahead, pos_x, pos_y))
+      model_y = float(np.interp(lookahead, pos_x, pos_y)) * scale
       error = target_y - model_y
       error_abs = abs(error)
       if error_abs <= _CENTER_ERROR_DEADBAND:
@@ -156,15 +168,15 @@ class LaneCenteringController:
 
 
 def get_raw_lane_centering_correction(model_v2, v_ego: float, offset: float,
-                                      e2e_authority: float) -> tuple[bool, float]:
+                                      e2e_authority: float, scale: float = 1.0) -> tuple[bool, float]:
   """Return the instantaneous lane-centering correction without controller filtering."""
-  return LaneCenteringController._raw_correction(model_v2, v_ego, offset, e2e_authority)
+  return LaneCenteringController._raw_correction(model_v2, v_ego, offset, e2e_authority, scale)
 
 
 def get_lane_centering_visual_direction(model_v2, v_ego: float, offset: float, e2e_authority: float,
                                         enabled: bool, lat_active: bool, pause_on_signal: bool = False,
                                         turn_signal_active: bool = False,
-                                        applied_correction: float | None = None) -> int:
+                                        applied_correction: float | None = None, scale: float = 1.0) -> int:
   """Return 1 for a right correction, -1 for left, and 0 when no correction is active."""
   if not enabled or not lat_active or (pause_on_signal and turn_signal_active):
     return 0
@@ -185,6 +197,7 @@ def get_lane_centering_visual_direction(model_v2, v_ego: float, offset: float, e
     v_ego,
     float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET)),
     float(np.clip(e2e_authority, 0.0, 1.0)),
+    scale,
   )
   if not valid or not np.isfinite(correction):
     return 0
