@@ -53,6 +53,7 @@ DEVELOPER_SIDEBAR_METRIC_OPTIONS: dict[int, str] = {
   15: "Longitudinal MPC Jerk: Danger Zone",
   16: "Longitudinal MPC Jerk: Speed Control",
   17: "Model Name",
+  18: "Lane Centering: Status",
 }
 
 def _theme_display_name(value: str) -> str:

@@ -3,6 +3,9 @@ import time
 import re
 import json
 from cereal import car
+from openpilot.selfdrive.controls.lib.lane_centering import (STATUS_ACTIVE, STATUS_IDLE, STATUS_NO_LANES, STATUS_NO_PATH,
+                                                             STATUS_OFF, STATUS_PAUSED, STATUS_WIDTH,
+                                                             get_lane_centering_diagnostics)
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight, FONT_SCALE
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -18,6 +21,14 @@ _WHITE_DIM = rl.Color(255, 255, 255, 85)
 _LOCKED_VALUE_COLOR = rl.Color(34, 197, 94, 255)
 _AUTO_TUNE_COLOR = rl.Color(59, 130, 246, 255)
 _FLM_OVERRIDE_COLOR = rl.Color(239, 68, 68, 255)
+_LANE_CENTERING_BLOCKED_COLOR = rl.Color(245, 158, 11, 255)
+_LANE_CENTERING_LABELS = {
+  STATUS_OFF: "OFF",
+  STATUS_IDLE: "IDLE",
+  STATUS_PAUSED: "PAUSED",
+  STATUS_NO_LANES: "NO LANES",
+  STATUS_NO_PATH: "NO PATH",
+}
 
 def parse_hex_color(hex_str: str, default_color=rl.WHITE) -> rl.Color:
   if not hex_str:
@@ -343,6 +354,12 @@ class DeveloperSidebar:
       ),
     }
 
+    lane_centering_metric, lane_centering_color = (("LANE CENTER", ""), None)
+    if 18 in self._active_ids:
+      lane_centering_metric, lane_centering_color = self._lane_centering_metric(sm, car_state, lat_active)
+    if lane_centering_color is not None:
+      self._metric_colors[18] = lane_centering_color
+
     model_name = ui_state.starpilot_toggles.get("model_name", "N/A")
     model_name = re.sub(r'\(.*\)', '', model_name)
     model_name = re.sub(r'[^a-zA-Z0-9 \-\.:]', '', model_name).strip()
@@ -364,8 +381,44 @@ class DeveloperSidebar:
       14: ("ACCEL JERK", f"{accel_jerk}"),
       15: ("DANGER JERK", f"{danger_jerk}"),
       16: ("SPEED JERK", f"{speed_jerk}"),
-      17: (model_name, "")
+      17: (model_name, ""),
+      18: lane_centering_metric,
     }
+
+  @staticmethod
+  def _lane_centering_metric(sm, car_state, lat_active: bool) -> tuple[tuple[str, str], rl.Color | None]:
+    """What lane centering is doing right now: status, and when active the error it corrects and the lateral pull."""
+    if not sm.valid.get("modelV2", False):
+      return ("LANE CENTER", "N/A"), None
+    toggles = ui_state.starpilot_toggles
+    v_ego = car_state.vEgo if car_state else 0.0
+    try:
+      diag = get_lane_centering_diagnostics(
+        sm["modelV2"], v_ego,
+        toggles.get("lane_center_offset", 0.0),
+        toggles.get("lane_centering_e2e_authority", 1.0),
+        bool(toggles.get("lane_centering", False)),
+        lat_active,
+        bool(toggles.get("lane_centering_pause_on_signal", True)),
+        bool(car_state and (car_state.leftBlinker or car_state.rightBlinker)),
+        bool(car_state and car_state.steeringPressed),
+        scale=toggles.get("lane_centering_scale", 1.0),
+        gain=toggles.get("lane_centering_gain", 0.3),
+      )
+    except Exception:
+      return ("LANE CENTER", "N/A"), None
+
+    if diag.status == STATUS_ACTIVE:
+      if abs(diag.correction) > 1e-6:
+        side = "R" if diag.correction > 0.0 else "L"
+        pull = abs(diag.correction) * v_ego ** 2
+        return (f"NUDGE {side}", f"{abs(diag.error) * 100:.0f}cm {pull:.2f}m/s²"), _LOCKED_VALUE_COLOR
+      return ("LC CENTERED", f"{diag.width:.2f}m lane"), _AUTO_TUNE_COLOR
+    if diag.status == STATUS_WIDTH:
+      return ("LC NARROW", f"{diag.width:.2f}m lane"), _LANE_CENTERING_BLOCKED_COLOR
+    label = _LANE_CENTERING_LABELS.get(diag.status, diag.status.upper())
+    color = _LANE_CENTERING_BLOCKED_COLOR if diag.status in (STATUS_NO_LANES, STATUS_NO_PATH) else None
+    return ("LANE CENTER", label), color
 
   def render(self, sidebar_rect: rl.Rectangle):
     if not self._visible:

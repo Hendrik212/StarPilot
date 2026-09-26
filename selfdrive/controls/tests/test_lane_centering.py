@@ -244,3 +244,42 @@ def test_out_of_range_scale_and_gain_are_clipped():
     high = _update_scaled(a, model, scale=1.0, gain=5.0)
     capped = _update_scaled(b, model, scale=1.0, gain=1.0)
   assert high == pytest.approx(capped)
+
+
+def _diag(model, **kwargs):
+  from openpilot.selfdrive.controls.lib.lane_centering import get_lane_centering_diagnostics
+  args = dict(v_ego=_V_EGO, offset=0.0, e2e_authority=0.0, enabled=True, lat_active=True)
+  args.update(kwargs)
+  return get_lane_centering_diagnostics(model, **args)
+
+
+def test_diagnostics_report_why_lane_centering_is_inactive():
+  from openpilot.selfdrive.controls.lib import lane_centering as lc
+  assert _diag(_model(), enabled=False).status == lc.STATUS_OFF
+  assert _diag(_model(), lat_active=False).status == lc.STATUS_IDLE
+  assert _diag(_model(), v_ego=2.0).status == lc.STATUS_IDLE
+  assert _diag(_model(), driver_override=True).status == lc.STATUS_IDLE
+  assert _diag(_model(), pause_on_signal=True, turn_signal_active=True).status == lc.STATUS_PAUSED
+  assert _diag(_model(lane_change=1)).status == lc.STATUS_PAUSED
+  assert _diag(_model(lane_prob=0.2)).status == lc.STATUS_NO_LANES
+  narrow = _diag(_model(left=-1.0, right=1.24))
+  assert narrow.status == lc.STATUS_WIDTH and narrow.width == pytest.approx(2.24)
+
+
+def test_diagnostics_match_controller_target():
+  from openpilot.selfdrive.controls.lib import lane_centering as lc
+  model = _model(left=-1.0, right=1.24, model_y=0.0)
+  diag = _diag(model, offset=0.29, scale=1.52, gain=0.5)
+  assert diag.status == lc.STATUS_ACTIVE
+  assert diag.width == pytest.approx(2.24 * 1.52)
+  assert diag.correction > 0.0  # target right of the path -> positive curvature
+  controller = LaneCenteringController()
+  for _ in range(500):
+    out = controller.update(0.0, model, _V_EGO, True, 0.29, 0.0, True, True, scale=1.52, gain=0.5)
+  assert out == pytest.approx(diag.correction, rel=1e-3)
+
+
+def test_diagnostics_centered_inside_deadband():
+  from openpilot.selfdrive.controls.lib import lane_centering as lc
+  diag = _diag(_model(left=-1.8, right=1.8, model_y=0.05))
+  assert diag.status == lc.STATUS_ACTIVE and diag.correction == 0.0

@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from cereal import log
 import numpy as np
 
@@ -26,6 +28,24 @@ _CENTER_ERROR_DEADBAND = 0.08
 _E2E_MAX_PATH_STD = 0.35
 _E2E_BREAK_IN_START = 0.15
 _E2E_BREAK_IN_FULL = 0.50
+
+
+STATUS_OFF = "off"
+STATUS_IDLE = "idle"
+STATUS_PAUSED = "paused"
+STATUS_NO_LANES = "no_lanes"
+STATUS_NO_PATH = "no_path"
+STATUS_WIDTH = "width"
+STATUS_ACTIVE = "active"
+
+
+@dataclass(frozen=True)
+class LaneCenteringEvaluation:
+  status: str
+  width: float = float("nan")          # lane width at the lookahead, real meters (after scale)
+  error: float = 0.0                   # target minus model path at the lookahead, real meters (+ = right)
+  raw_correction: float = 0.0          # curvature before the cap and gain
+  correction: float = 0.0              # curvature after the cap and gain (the controller's target)
 
 
 class LaneCenteringController:
@@ -99,6 +119,11 @@ class LaneCenteringController:
 
   @staticmethod
   def _raw_correction(model_v2, v_ego: float, offset: float, e2e_authority: float, scale: float = 1.0) -> tuple[bool, float]:
+    evaluation = LaneCenteringController._evaluate(model_v2, v_ego, offset, e2e_authority, scale)
+    return evaluation.status == STATUS_ACTIVE, evaluation.raw_correction
+
+  @staticmethod
+  def _evaluate(model_v2, v_ego: float, offset: float, e2e_authority: float, scale: float = 1.0) -> "LaneCenteringEvaluation":
     # scale converts the model's lateral distances to real metres. The model assumes a car-height
     # camera (~1.22 m); a higher mount shrinks every ground distance by roughly
     # assumed_height / real_height (VW Crafter at 1.85 m: lanes read ~0.65x). Only lateral
@@ -109,13 +134,13 @@ class LaneCenteringController:
       probs = np.asarray(model_v2.laneLineProbs, dtype=float)
       stds = np.asarray(model_v2.laneLineStds, dtype=float)
       if len(lane_lines) < 3 or probs.size < 3 or stds.size < 3:
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_NO_LANES)
       if not np.isfinite(probs[[1, 2]]).all() or not np.isfinite(stds[[1, 2]]).all():
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_NO_LANES)
       if np.any(probs[[1, 2]] < _MIN_LANE_PROB) or np.any(probs[[1, 2]] > 1.0):
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_NO_LANES)
       if np.any(stds[[1, 2]] < 0.0) or np.any(stds[[1, 2]] > _MAX_LANE_STD):
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_NO_LANES)
 
       left_x = np.asarray(lane_lines[1].x, dtype=float)
       left_y = np.asarray(lane_lines[1].y, dtype=float)
@@ -126,22 +151,23 @@ class LaneCenteringController:
       if not (LaneCenteringController._valid_path(left_x, left_y) and
               LaneCenteringController._valid_path(right_x, right_y) and
               LaneCenteringController._valid_path(pos_x, pos_y)):
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_NO_PATH)
 
       lookahead = float(np.clip(v_ego, 8.0, 35.0))
       if not all(LaneCenteringController._covers(x, lookahead) for x in (left_x, right_x, pos_x)):
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_NO_PATH)
 
       left = float(np.interp(lookahead, left_x, left_y)) * scale
       right = float(np.interp(lookahead, right_x, right_y)) * scale
       width = right - left
       if not _MIN_LANE_WIDTH <= width <= _MAX_LANE_WIDTH:
-        return False, 0.0
+        return LaneCenteringEvaluation(STATUS_WIDTH, width=width)
 
       max_safe_offset = min(_MAX_OFFSET, max(0.0, width * 0.5 - _MIN_CENTER_TO_LINE))
       target_y = 0.5 * (left + right) + float(np.clip(offset, -max_safe_offset, max_safe_offset))
       model_y = float(np.interp(lookahead, pos_x, pos_y)) * scale
       error = target_y - model_y
+      path_error = error
       error_abs = abs(error)
       if error_abs <= _CENTER_ERROR_DEADBAND:
         error = 0.0
@@ -162,9 +188,10 @@ class LaneCenteringController:
       except (AttributeError, TypeError, ValueError):
         pass
 
-      return True, float(2.0 * error / lookahead ** 2)
+      return LaneCenteringEvaluation(STATUS_ACTIVE, width=width, error=float(path_error),
+                                     raw_correction=float(2.0 * error / lookahead ** 2))
     except (AttributeError, IndexError, TypeError, ValueError):
-      return False, 0.0
+      return LaneCenteringEvaluation(STATUS_NO_LANES)
 
 
 def get_raw_lane_centering_correction(model_v2, v_ego: float, offset: float,
@@ -207,3 +234,39 @@ def get_lane_centering_visual_direction(model_v2, v_ego: float, offset: float, e
   if abs(correction) <= _VISUAL_CORRECTION_EPSILON:
     return 0
   return 1 if correction > 0.0 else -1
+
+
+def get_lane_centering_diagnostics(model_v2, v_ego: float, offset: float, e2e_authority: float, enabled: bool,
+                                   lat_active: bool, pause_on_signal: bool = False, turn_signal_active: bool = False,
+                                   driver_override: bool = False, scale: float = 1.0,
+                                   gain: float = _MAX_GAIN) -> LaneCenteringEvaluation:
+  """Mirror LaneCenteringController.update()'s gating and return why it is (in)active, for onroad debugging.
+
+  correction is the controller's unsmoothed target; the applied value follows it with a 0.4 s time constant.
+  """
+  if not enabled:
+    return LaneCenteringEvaluation(STATUS_OFF)
+  try:
+    v_ego = float(v_ego)
+    offset = float(offset)
+    e2e_authority = float(e2e_authority)
+    scale = float(scale)
+    gain = float(gain)
+    if not np.isfinite([v_ego, offset, e2e_authority, scale, gain]).all():
+      return LaneCenteringEvaluation(STATUS_IDLE)
+    if not lat_active or v_ego < _MIN_V_EGO or driver_override:
+      return LaneCenteringEvaluation(STATUS_IDLE)
+    if pause_on_signal and turn_signal_active:
+      return LaneCenteringEvaluation(STATUS_PAUSED)
+    if model_v2.meta.laneChangeState != log.LaneChangeState.off:
+      return LaneCenteringEvaluation(STATUS_PAUSED)
+  except (AttributeError, TypeError, ValueError):
+    return LaneCenteringEvaluation(STATUS_IDLE)
+
+  evaluation = LaneCenteringController._evaluate(
+    model_v2, v_ego, float(np.clip(offset, -_MAX_OFFSET, _MAX_OFFSET)), float(np.clip(e2e_authority, 0.0, 1.0)), scale)
+  if evaluation.status != STATUS_ACTIVE:
+    return evaluation
+  correction = float(np.clip(evaluation.raw_correction, -_MAX_RAW_CORRECTION, _MAX_RAW_CORRECTION)) * \
+               float(np.clip(gain, 0.0, _MAX_USER_GAIN))
+  return LaneCenteringEvaluation(STATUS_ACTIVE, evaluation.width, evaluation.error, evaluation.raw_correction, correction)
