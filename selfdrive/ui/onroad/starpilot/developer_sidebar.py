@@ -386,7 +386,7 @@ class DeveloperSidebar:
     }
 
   @staticmethod
-  def _lane_centering_metric(sm, car_state, lat_active: bool) -> tuple[tuple[str, str], rl.Color | None]:
+  def _lane_centering_metric(sm, car_state, lat_active: bool) -> tuple[tuple[str, str], "rl.Color | None"]:
     """What lane centering is doing right now: status, and when active the error it corrects and the lateral pull."""
     if not sm.valid.get("modelV2", False):
       return ("LANE CENTER", "N/A"), None
