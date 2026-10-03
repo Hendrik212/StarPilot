@@ -796,7 +796,7 @@ assert(P.formatNumericParamValue(speed, 3, { IsMetric: true }) === "3 km/h", "me
 assert(P.usesMetricUnits({ IsMetric: "1" }) === true, "serialized metric bool")
 const laneOffset = { key: "LaneCenterOffset", data_type: "float", min: 0, max: 0.3, step: 0.01 }
 const laneBounds = P.numericBounds(laneOffset, {})
-assert(laneBounds.min === -0.3, "lane offset keeps signed lower bound")
+assert(laneBounds.min === -0.5, "lane offset keeps signed lower bound")
 assert(P.snapNumericToBoundsAndStep(-0.01, laneBounds, 2) === -0.01, "lane offset snaps below zero")
 console.log("params.js logic OK")
 """,

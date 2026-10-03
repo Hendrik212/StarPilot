@@ -751,7 +751,7 @@ function numericBounds(param) {
   }
 
   if (param.key === "LaneCenterOffset") {
-    return { min: -0.3, max: 0.3, step: 0.01 }
+    return { min: -0.5, max: 0.5, step: 0.01 }
   }
 
   // Personality jerk params are stored as percentage-style integers (25..200).

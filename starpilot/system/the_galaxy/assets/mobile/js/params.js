@@ -148,7 +148,7 @@ export function numericBounds(param, values = {}) {
     return { min: 0, max: 101, step: 1 }
   }
   if (param.key === "LaneCenterOffset") {
-    return { min: -0.3, max: 0.3, step: 0.01 }
+    return { min: -0.5, max: 0.5, step: 0.01 }
   }
   if (/^(Traffic|Aggressive|Standard|Relaxed)Jerk(Acceleration|Deceleration|Danger|SpeedDecrease|Speed)$/.test(String(param.key || ""))) {
     return { min: 25, max: 200, step: 1 }

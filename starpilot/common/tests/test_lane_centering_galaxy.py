@@ -40,8 +40,8 @@ def test_lane_centering_galaxy_controls():
   assert pause_on_signal["parent_key"] == "LaneCentering"
 
   assert offset["parent_key"] == "LaneCentering"
-  assert offset["min"] == -0.3
-  assert offset["max"] == 0.3
+  assert offset["min"] == -0.5
+  assert offset["max"] == 0.5
   assert offset["step"] == 0.01
 
   assert e2e_authority["parent_key"] == "LaneCentering"

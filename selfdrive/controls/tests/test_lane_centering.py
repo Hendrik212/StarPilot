@@ -283,3 +283,12 @@ def test_diagnostics_centered_inside_deadband():
   from openpilot.selfdrive.controls.lib import lane_centering as lc
   diag = _diag(_model(left=-1.8, right=1.8, model_y=0.05))
   assert diag.status == lc.STATUS_ACTIVE and diag.correction == 0.0
+
+
+def test_offset_up_to_half_meter_in_wide_lane():
+  from openpilot.selfdrive.controls.lib import lane_centering as lc
+  wide = _model(left=-1.9, right=1.9)  # 3.8 m lane: safe limit 0.8 m, so the 0.5 m cap applies
+  assert _diag(wide, offset=0.5).error == pytest.approx(0.5)
+  assert _diag(wide, offset=0.8).error == pytest.approx(0.5)
+  narrow = _model(left=-1.4, right=1.4)  # 2.8 m lane: safe limit 0.3 m wins over the cap
+  assert _diag(narrow, offset=0.5).error == pytest.approx(0.3)

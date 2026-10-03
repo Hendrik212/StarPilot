@@ -796,7 +796,7 @@ class StarPilotVariables:
     honda_pid_lateral = toggle.car_make == "honda" and CP.lateralTuning.which() == "pid" and not is_angle_car
     toggle.honda_lateral_pid_kp_scale = self.get_value("HondaLateralPidKpScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
     toggle.honda_lateral_pid_ki_scale = self.get_value("HondaLateralPidKiScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
-    toggle.lane_center_offset = self.get_value("LaneCenterOffset", cast=float, condition=toggle.lane_centering, default=0.0, min=-0.3, max=0.3)
+    toggle.lane_center_offset = self.get_value("LaneCenterOffset", cast=float, condition=toggle.lane_centering, default=0.0, min=-0.5, max=0.5)
     try:
       toggle.lane_centering_scale = self.get_value("LaneCenteringScale", cast=float, condition=toggle.lane_centering, default=1.0, min=0.5, max=2.0)
       toggle.lane_centering_gain = self.get_value("LaneCenteringGain", cast=float, condition=toggle.lane_centering, default=0.3, min=0.0, max=1.0)
