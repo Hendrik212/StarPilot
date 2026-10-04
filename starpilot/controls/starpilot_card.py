@@ -130,12 +130,15 @@ class StarPilotCard:
       self.dm_aol_main_seen_off = False
 
     if self.dm_aol_disengaged:
-      if not carState.cruiseState.available:
-        self.dm_aol_main_seen_off = True
-      rearmed = (self.dm_aol_main_seen_off and carState.cruiseState.available) or lkas_pressed
-      if rearmed and not dm_disengage:
-        self.dm_aol_disengaged = False
+      if dm_disengage:
+        # A re-arm only counts once DM no longer demands the disengagement (e.g. after the lockout ends)
         self.dm_aol_main_seen_off = False
+      else:
+        if not carState.cruiseState.available:
+          self.dm_aol_main_seen_off = True
+        if (self.dm_aol_main_seen_off and carState.cruiseState.available) or lkas_pressed:
+          self.dm_aol_disengaged = False
+          self.dm_aol_main_seen_off = False
 
     return self.dm_aol_disengaged
 
