@@ -256,7 +256,8 @@ class Car:
 
     self.starpilot_card = StarPilotCard(self.CP, self.FPCP)
 
-    starpilot_services = ['starpilotOnroadEvents', 'starpilotPlan', 'starpilotSelfdriveState', 'liveCalibration', 'selfdriveState']
+    starpilot_services = ['starpilotOnroadEvents', 'starpilotPlan', 'starpilotSelfdriveState', 'liveCalibration', 'selfdriveState',
+                         'driverMonitoringState']
     if self.CP.brand == "rivian":
       starpilot_services.append('liveParameters')
     self.sm = self.sm.extend(starpilot_services)

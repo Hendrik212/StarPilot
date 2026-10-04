@@ -1393,3 +1393,73 @@ def test_favorite_traffic_mode_action_is_consumed_when_not_active(monkeypatch, t
 
   assert card.traffic_mode_enabled is False
   assert card._favorite_traffic_mode_counter == 1
+
+
+def _dm(level="none", lockout=False):
+  AlertLevel = spc.log.DriverMonitoringState.AlertLevel
+  return SimpleNamespace(alertLevel=getattr(AlertLevel, level), lockout=lockout, alwaysOnLockout=False)
+
+
+def _aol_card(monkeypatch, tmp_path):
+  monkeypatch.setattr(spc, "Params", FakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+  card = spc.StarPilotCard(SimpleNamespace(brand="volkswagen", carFingerprint="VOLKSWAGEN_CRAFTER_MK2"),
+                           SimpleNamespace(alternativeExperience=32))
+  return card, make_toggles(always_on_lateral=True, always_on_lateral_main=True)
+
+
+def _step(card, sm, toggles, available=True, button_events=None):
+  return card.update(make_car_state(available=available, button_events=button_events), SimpleNamespace(distancePressed=False),
+                     sm, toggles).alwaysOnLateralEnabled
+
+
+def test_aol_follows_main_switch(monkeypatch, tmp_path):
+  card, toggles = _aol_card(monkeypatch, tmp_path)
+  sm = make_sm()
+  sm["driverMonitoringState"] = _dm()
+  assert _step(card, sm, toggles, available=True)
+  assert not _step(card, sm, toggles, available=False)
+  assert _step(card, sm, toggles, available=True)
+
+
+def test_dm_terminal_alert_disengages_aol_until_main_cycle(monkeypatch, tmp_path):
+  card, toggles = _aol_card(monkeypatch, tmp_path)
+  sm = make_sm()
+  sm["driverMonitoringState"] = _dm()
+  assert _step(card, sm, toggles)
+
+  sm["driverMonitoringState"] = _dm("three")
+  assert not _step(card, sm, toggles)          # disengages on the terminal alert
+  sm["driverMonitoringState"] = _dm()          # awareness resets once AOL is off
+  for _ in range(5):
+    assert not _step(card, sm, toggles)        # stays off: no automatic re-engage
+  assert not _step(card, sm, toggles, available=False)
+  assert _step(card, sm, toggles, available=True)   # deliberate main off -> on re-arms
+
+
+def test_dm_lockout_blocks_rearm(monkeypatch, tmp_path):
+  card, toggles = _aol_card(monkeypatch, tmp_path)
+  sm = make_sm()
+  sm["driverMonitoringState"] = _dm(lockout=True)
+  assert not _step(card, sm, toggles)
+  assert not _step(card, sm, toggles, available=False)
+  assert not _step(card, sm, toggles, available=True)   # main cycle during lockout does nothing
+  sm["driverMonitoringState"] = _dm()
+  assert not _step(card, sm, toggles, available=True)   # lockout over, still needs a deliberate cycle
+  assert not _step(card, sm, toggles, available=False)
+  assert _step(card, sm, toggles, available=True)
+
+
+def test_dm_disengage_rearms_with_lkas_press(monkeypatch, tmp_path):
+  card, toggles = _aol_card(monkeypatch, tmp_path)
+  sm = make_sm()
+  sm["driverMonitoringState"] = _dm("three")
+  assert not _step(card, sm, toggles)
+  sm["driverMonitoringState"] = _dm()
+  lkas = [make_wrapped_button_event(spc.ButtonType.lkas, True)]
+  assert _step(card, sm, toggles, button_events=lkas)
+
+
+def test_missing_dm_service_does_not_block_aol(monkeypatch, tmp_path):
+  card, toggles = _aol_card(monkeypatch, tmp_path)
+  assert _step(card, make_sm(), toggles)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from cereal import log
 from opendbc.car import structs
 from opendbc.car.chrysler.values import pacifica_hybrid_aol_requires_set_press
 from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR, HyundaiFlags
@@ -41,6 +42,15 @@ def aol_blocked_by_immediate_disable(*alert_types) -> bool:
     ET.IMMEDIATE_DISABLE in alert_type and alert_type not in AOL_NON_BLOCKING_IMMEDIATE_DISABLE_ALERTS
     for alert_type in alert_types
   )
+
+
+def dm_requires_aol_disengage(sm) -> bool:
+  """Driver monitoring's terminal alert and lockout demand a disengagement (stock openpilot disengages)."""
+  try:
+    dm = sm["driverMonitoringState"]
+  except KeyError:
+    return False
+  return dm.alertLevel == log.DriverMonitoringState.AlertLevel.three or bool(dm.lockout) or bool(dm.alwaysOnLockout)
 
 
 class StarPilotCard:
@@ -90,6 +100,10 @@ class StarPilotCard:
     self.customPressed_previously = False
     self.custom_counter = 0
     self.pause_lateral = False
+    # Set when driver monitoring demanded a disengagement while AOL was steering. AOL stays off until the
+    # driver re-arms it on purpose (main switch off -> on, or the LKAS button), and never during a lockout.
+    self.dm_aol_disengaged = False
+    self.dm_aol_main_seen_off = False
     self.pause_longitudinal = False
     self.switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled")
     self.traffic_mode_enabled = False
@@ -108,6 +122,22 @@ class StarPilotCard:
     self.very_long_press_threshold = CRUISE_LONG_PRESS * 5
 
     self.error_log = ERROR_LOGS_PATH / "error.txt"
+
+  def _update_dm_aol_disengage(self, sm, carState, lkas_pressed: bool) -> bool:
+    dm_disengage = dm_requires_aol_disengage(sm)
+    if dm_disengage and self.always_on_lateral_enabled and not self.dm_aol_disengaged:
+      self.dm_aol_disengaged = True
+      self.dm_aol_main_seen_off = False
+
+    if self.dm_aol_disengaged:
+      if not carState.cruiseState.available:
+        self.dm_aol_main_seen_off = True
+      rearmed = (self.dm_aol_main_seen_off and carState.cruiseState.available) or lkas_pressed
+      if rearmed and not dm_disengage:
+        self.dm_aol_disengaged = False
+        self.dm_aol_main_seen_off = False
+
+    return self.dm_aol_disengaged
 
   def handle_button_event(self, key, sm, starpilot_toggles):
     experimental_active = bool(getattr(sm["carControl"], "longActive", False) or
@@ -359,6 +389,7 @@ class StarPilotCard:
     )
     self.always_on_lateral_enabled &= not (carState.brakePressed and carState.vEgo < starpilot_toggles.always_on_lateral_pause_speed) or carState.standstill
     self.always_on_lateral_enabled &= not self.error_log.is_file()
+    self.always_on_lateral_enabled &= not self._update_dm_aol_disengage(sm, carState, lkas_pressed)
 
     if sm.updated["starpilotPlan"] or any(be_type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be_type in button_event_types):
       self.accel_pressed = any(be_type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be_type in button_event_types)
